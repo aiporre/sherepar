@@ -40,17 +40,17 @@ def plot_mesh(mesh):
     plt.tight_layout()
     plt.show()
 
-def get_segments(data):
+def get_segments(data, mask=None, num_segments=100):
     # use the slic algorithm to get the segments
-    segments = segmentation.slic(data, compactness=10, n_segments=100)
+    segments = segmentation.slic(data, mask=mask, compactness=10, n_segments=num_segments, channel_axis=None)
     return segments
 
 class Segmentation:
-    def __init__(self, data):
+    def __init__(self, data, mask=None, num_segments=100):
         self.data = data
-        self.segments = get_segments(data)
+        self.segments = get_segments(data, mask=mask, num_segments=num_segments)
         self.meshes = []
-        for i in range(self.segments.max()):
+        for i in np.unique(self.segments):
             self.meshes.append(get_mesh(self.segments==i))
 
 
