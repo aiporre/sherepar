@@ -1,6 +1,9 @@
 import os
+import tempfile
 import numpy as np
 import nibabel as nb
+import meshio
+import pygalmesh
 from skimage import measure
 from skimage import segmentation
 from nibabel.testing import data_path
@@ -8,7 +11,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
-def get_mesh(data):
+def get_surface_mesh(data):
     # Use marching cubes to obtain the surface mesh of these ellipsoids
     verts, faces, normals, values = measure.marching_cubes(data, 0)
     return (verts, faces, normals, values)
@@ -49,8 +52,29 @@ class Segmentation:
     def __init__(self, data, mask=None, num_segments=100):
         self.data = data
         self.segments = get_segments(data, mask=mask, num_segments=num_segments)
-        self.meshes = []
-        for i in np.unique(self.segments):
-            self.meshes.append(get_mesh(self.segments==i))
+        self.meshes = len(np.unique(self.segments))* [None]
+    def __getitem__(self, idx):
+        if self.meshes[idx] is None:
+            _mesh_surf = get_surface_mesh(self.segments==idx)
+            # save in vtk file
+            with tempfile.NamedTemporaryFile(suffix=".vtk", delete=False) as f:
+                fname = f.name
+                print('Created temporary file: ', fname)
+                # write mesh surf into a vtk file
+                points = _mesh_surf[0]
+                cells = {'triangle': _mesh_surf[1]}
+                mesh_output = meshio.Mesh(points, cells)
+                mesh_output.write(fname)
+                # convert mesh surface into mesh volume with pygalmesh
+                mesh_vol = pygalmesh.generate_volume_mesh_from_surface_mesh(
+                    fname,
+                    min_facet_angle=25.0,
+                    max_radius_surface_delaunay_ball=0.15,
+                    max_facet_distance=0.008,
+                    max_circumradius_edge_ratio=3.0,
+                    verbose=False)
+            self.meshes[idx] = mesh_vol
+
+        return self.meshes[idx]
 
 
