@@ -53,6 +53,10 @@ class Segmentation:
         self.data = data
         self.segments = get_segments(data, mask=mask, num_segments=num_segments)
         self.meshes = len(np.unique(self.segments))* [None]
+        self.num_segments = num_segments
+
+    def __len__(self):
+        return self.num_segments
     def __getitem__(self, idx):
         if self.meshes[idx] is None:
             _mesh_surf = get_surface_mesh(self.segments==idx)
