@@ -152,10 +152,6 @@ class MeshVolume(Mesh):
                         v1, v2 = _vertices[a], _vertices[b]
                         _edges[(a,b)] = (v1,v2)
 
-    def get_vertex_neighbors(self, v_id):
-        for a, b in self.edges.keys():
-            if a == v_id:
-                return self.vertices[v_id]
 
 
 
