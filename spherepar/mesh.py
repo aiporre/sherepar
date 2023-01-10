@@ -212,10 +212,41 @@ class MeshVolume(Mesh):
                         a, b = b, a
                     if (a, b) not in _edges:
                         v1, v2 = _vertices[a], _vertices[b]
-                        _edges[(a,b)] = (v1,v2)
+                        _edges[(a, b)] = (v1, v2)
+            # class properties
+            self.tetrahedra = _tetrahedra
+            super(MeshVolume, self).__init__(_vertices, _edges, _faces)
 
 
+class MeshSurf(Mesh):
+    def __init__(self, vertices: list[np.ndarray] | np.ndarray, faces: list[np.ndarray] | np.ndarray):
+        _vertices = {}
+        for _id, v in vertices:
+            _vertices[_id] = Vertex(v, _id)
+        # extract faces
+        _faces = {}
+        for _id, f in enumerate(faces):
+            u, v, w = _vertices[f[0]], _vertices[f[1]], _vertices[f[2]]
+            _faces[_id] = Face(u, v, w, _id)
 
+        # extrac edges from the faces
+        _edges = {}
+        for f in faces:
+            for a, b in zip(f[:-1], f[1:]):
+                if a > b:
+                    a, b = b, a
+                if (a, b) not in _edges:
+                    v1, v2 = _vertices[a], _vertices[b]
+                    _edges[(a, b)] = (v1, v2)
+
+        # class properties
+        super(MeshSurf, self).__init__(_vertices, _edges, _faces)
+
+    def get_laplacian_matrix(self, weight: str = 'cotangent'):
+        if weight == 'cotangent':
+            return self._get_laplacian_cotangent()
+        else:
+            raise ValueError(f'Weight = {weight} not implemented valid is [cotangent, or ...')
 
 
 
