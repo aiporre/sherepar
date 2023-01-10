@@ -9,6 +9,7 @@ from skimage import segmentation
 from nibabel.testing import data_path
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from scipy.sparse import coo_matrix
 
 
 def get_surface_mesh(data):
@@ -51,9 +52,15 @@ def get_segments(data, mask=None, num_segments=100):
 
 
 class Vertex:
-    def __init__(self, pos: list | np.ndarray, _id: int):
-        self.pos = pos
+    def __init__(self, pos: tuple | list | np.ndarray, _id: int):
+        self._pos = pos
         self.id = _id
+
+    @property
+    def pos(self) -> np.ndarray:
+        if isinstance(self._pos, list) or isinstance(self._pos, tuple):
+            self._pos = np.array(self._pos)
+        return self._pos
 
 
 class EdgeBase:
@@ -84,6 +91,30 @@ class Edge(EdgeBase):
         else:
             return False
 
+class Vector(Edge):
+
+    def __init__(self, u: Vertex, v: Vertex):
+        self.data = u.pos - v.pos
+        super(Vector, self).__init__(u, v)
+    def __eq__(self, other_vector):
+        if self.u.id == other_vector.u.id and self.v.id == other_vector.v.id \
+                and self.u.pos == other_vector.u.pos and self.v.pos == other_vector.v.pos:
+            return True
+        else:
+            return False
+
+    def dot(self, w: 'Vector') -> float:
+        # u . w , where u is the vector on which w dot product is operated
+        return float(self.data.dot(w.data))
+
+    def cross(self, w: 'Vector') -> 'Vector':
+        # u . w , where u is the vector on which w dot product is operated
+        uw_pos = np.cross(self.data, w.data)
+        new_vertex = Vertex(uw_pos, self.u.id+self.v.id)
+        return Vector(self.u, new_vertex)
+
+    def norm(self) -> float:
+        return float(np.linalg.norm(self.data))
 
 class Face:
     def __init__(self, u: Vertex, v: Vertex, w: Vertex):
@@ -102,7 +133,7 @@ class Face:
             edge = Edge(edge[0], edge[1])
         return edge
 
-    def get_opposite_vertex(self, v1_id: int, v2_id: int)-> Vertex | None:
+    def get_opposite_vertex(self, v1_id: int, v2_id: int) -> Vertex | None:
         # check if vertex in the faces
         if v1_id > v2_id:
             v1_id, v2_id = v2_id, v1_id
@@ -248,11 +279,66 @@ class MeshSurf(Mesh):
         else:
             raise ValueError(f'Weight = {weight} not implemented valid is [cotangent, or ...')
 
+    def _get_laplacian_cotangent(self):
+        values = []
+        index_row = []
+        index_col = []
+        for _id, v in self.vertices.items():
+            neighbors = self.get_vertex_neighbors(_id)
+            values_col = []
+            for k in neighbors:
+                face = self.get_edge_faces(v.id, k.id)
+                assert len(
+                    face) == 2, 'Error calculation of laplacian matrix, wrong definition of faces. Edge has more that one fac'
+                # v---k forms the central vector
+                face_a, face_b = face[0], face[1]
+                a = face_a.get_opposite_vertex(v.id, k.id)
+                b = face_b.get_opposite_vertex(v.id, k.id)
 
-
-
-
-
+                # a---->v and b----> are the U_vector's
+                # a---->k and b---->k are the V_vector's
+                """
+                           V         k        V
+                a───────────────────► ◄──────────────────b
+                 \ ) α_ij            ▲           β_ij ( /
+                  \                  │                 /
+                   \                 │                /
+                    \                │               /
+                     \               │              /
+                      \              │             /
+                       \             │            /
+                        \            │           /
+                         \           │          /
+                       U  \          │         /U
+                           \         │        /
+                            \        │       /
+                             \       │      /
+                              \      │     /
+                               \     │    /
+                                \    │   /
+                                 \   │  /
+                                  \  │ /
+                                   \ │/
+                                    \/
+                                    v
+                """
+                # alpha_ij
+                u_vec = Vector(a, v)
+                v_vec = Vector(a, k)
+                cotangent_alpha = u_vec.dot(v_vec)/u_vec.cross(v_vec).norm()
+                # beta_ij
+                u_vec = Vector(b, v)
+                v_vec = Vector(b, k)
+                cotangent_beta= u_vec.dot(v_vec)/u_vec.cross(v_vec).norm()
+                values_col.append((cotangent_alpha+cotangent_beta)/2)
+                index_col.append(v.id)
+                index_row.append(k.id)
+            ### once completed the computation of w_ij for all j in neighbors to i we sum to compute the diagonal of L
+            values.extend(values_col)
+            values.append(sum(values_col))
+            index_col.append(v.id)
+            index_row.append(v.id)
+        return coo_matrix((values, (index_row, index_col)), shape=(max(index_row), max(index_col)))
 
 def get_edge_faces(self, id):
     raise NotImplementedError
