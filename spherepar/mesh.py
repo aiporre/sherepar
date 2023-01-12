@@ -131,7 +131,7 @@ class Face:
         # look for the pair of ids
         if v1_id > v2_id:
             v1_id, v2_id = v2_id, v1_id
-        edge = self.edges.get((v1_id, v2_id), None)
+        edge = self._edges_dict.get((v1_id, v2_id), None)
         if edge is not None:
             edge = Edge(edge[0], edge[1])
         return edge
@@ -159,10 +159,14 @@ class Face:
         # create a list of edges
         if self._edges is None:
             triplet_vrtx = [self.u, self.v, self.w]
-            for a, b in zip(triplet_vrtx[:-1], triplet_vrtx[1:]):
-                if a.id > b.id:
-                    a, b = b, a
-                self._edges = {(a.id, b.id): (a, b)}
+            self._edges = {}
+            for i in range(3):
+                for j in range(i+1, 3):
+                    a, b = triplet_vrtx[i], triplet_vrtx[j]
+                    if a.id > b.id:
+                        a, b = b, a
+                    self._edges[(a.id, b.id)] = (a, b)
+
         return self._edges
 
 
@@ -189,15 +193,16 @@ class Mesh:
         neighbors = []
         for a, b in self.edges.keys():
             if a == v_id:
-                neighbors.append(self.vertices[v_id])
-            if b == v_id:
-                neighbors.append(self.vertices[v_id])
+                neighbors.append(self.vertices[b])
+            elif b == v_id:
+                neighbors.append(self.vertices[a])
         if len(neighbors) > 0:
             return neighbors
         else:
             return None
 
     def get_edge_faces(self, e_id: tuple[int, int]) -> list[Face] | None:
+        # print('asdf')
         if e_id in self.edges:
             edge = self.edges[e_id]
         elif (e_id[1], e_id[0]) in self.edges:
@@ -207,7 +212,9 @@ class Mesh:
             return None
         faces_with_edge = []
         for _ids, face in self.faces.items():
-            if face.get_edge(edge.u.id, edge.v.id) is not None:
+            # print('lookin for ', (edge.u.id, edge.v.id), "---> ", face)
+            if edge.u.id in _ids and edge.v.id in _ids:
+                # print('found face: ', face)
                 faces_with_edge.append(face)
         if len(faces_with_edge) > 0:
             return faces_with_edge
@@ -273,29 +280,36 @@ class MeshVolume(Mesh):
             # extract edges from
             _edges = {}
             for tetra in tetras.data:
-                for a, b in zip(tetra[:-1], tetra[1:]):
-                    if a > b:
-                        a, b = b, a
-                    if (a, b) not in _edges:
-                        v1, v2 = _vertices[a], _vertices[b]
-                        e_obj = Edge(v1, v2)
-                        _edges[e_obj.id] = e_obj
+                for i in range(4):
+                    for j in range(i+1, 4):
+                        a, b = tetra[i], tetra[j]
+                        if a > b:
+                            a, b = b, a
+                        if (a, b) not in _edges:
+                            v1, v2 = _vertices[a], _vertices[b]
+                            e_obj = Edge(v1, v2)
+                            _edges[e_obj.id] = e_obj
 
         self.tetrahedra = _tetrahedra
         super(MeshVolume, self).__init__(_vertices, _edges, faces)
 
-
-def get_tetrahedra_collection(self, use_id: bool = True) -> np.ndarray | list[Edge]:
-    if use_id:
-        values = np.zeros((len(self.vertices), 4))
-    else:
-        values = []
-    for i, t in enumerate(self.tetrahedra):
+    def get_tetrahedra_collection(self, use_id: bool = True) -> np.ndarray | list[Edge]:
         if use_id:
-            values[i] = np.array(t.id)
+            values = np.zeros((len(self.vertices), 4))
         else:
-            values.append(t)
-    return values
+            values = []
+        for i, t in enumerate(self.tetrahedra):
+            if use_id:
+                values[i] = np.array(t.id)
+            else:
+                values.append(t)
+        return values
+
+    def __str__(self):
+        return f"Mesh(vertices={len(self.vertices)}*Vertex, edges={len(self.edges)}*Edges, faces={len(self.faces)}*Faces, tetras={len(self.tetrahedra)}*Tetras)"
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class MeshSurf(Mesh):
@@ -313,13 +327,15 @@ class MeshSurf(Mesh):
         # extrac edges from the faces
         _edges = {}
         for f in faces:
-            for a, b in zip(f[:-1], f[1:]):
-                if a > b:
-                    a, b = b, a
-                if (a, b) not in _edges:
-                    v1, v2 = _vertices[a], _vertices[b]
-                    e_obj = Edge(v1, v2)
-                    _edges[e_obj.id] = e_obj
+            for i in range(3):
+                for j in range(i + 1, 3):
+                    a, b = f[i], f[j]
+                    if a > b:
+                        a, b = b, a
+                    if (a, b) not in _edges:
+                        v1, v2 = _vertices[a], _vertices[b]
+                        e_obj = Edge(v1, v2)
+                        _edges[e_obj.id] = e_obj
 
                     # class properties
         super(MeshSurf, self).__init__(_vertices, _edges, _faces)
