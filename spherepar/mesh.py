@@ -268,12 +268,12 @@ class Mesh:
 
     def get_faces_collection(self, use_id: bool = True) -> np.ndarray | list[Edge]:
         if use_id:
-            values = np.zeros((len(self.faces), 3))
+            values = np.zeros((len(self.faces), 3), dtype=np.int32)
         else:
             values = []
         for i, f in enumerate(self.faces.values()):
             if use_id:
-                values[i] = np.array(f.id)
+                values[i] = np.array(f.id, dtype=np.int32)
             else:
                 values.append(f)
         return values
@@ -388,8 +388,12 @@ class MeshSurf(Mesh):
             values_col = []
             for k in neighbors:
                 face = self.get_edge_faces((v.id, k.id))
-                assert len(
-                    face) == 2, 'Error calculation of laplacian matrix, wrong definition of faces. Edge has more that one fac'
+                if face is None:
+                    print(f'Edge {(v.id, k.id)} has not two faces. Surface is not a genus-zero closed !')
+                    continue
+                assert len(face) == 2, 'Error calculation of laplacian matrix, wrong definition of faces. ' \
+                                       f'Edge {(v.id, k.id)} must have two faces (now={face} '
+
                 # v---k forms the central vector
                 face_a, face_b = face[0], face[1]
                 a = face_a.get_opposite_vertex(v.id, k.id)
@@ -438,7 +442,8 @@ class MeshSurf(Mesh):
             values.append(sum(values_col))
             index_col.append(v.id)
             index_row.append(v.id)
-        return coo_matrix((values, (index_row, index_col)), shape=(max(index_row), max(index_col)))
+        N = max((max(index_row), max(index_col))) + 1
+        return coo_matrix((values, (index_row, index_col)), shape=(N, N))
 
 
 def get_edge_faces(self, id):
