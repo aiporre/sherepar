@@ -10,14 +10,15 @@ img = data.copy()
 mask = np.zeros_like(img)
 mask[img>0] = 1
 # make segmented image
-segs = Segmentation(img, mask=mask, num_segments=100)
+segs = Segmentation(img, mask=mask, num_segments=10)
 
 # Use marching cubes to obtain the surface mesh of these ellipsoids
-a = segs[50]
+a = segs[5]
 print('Calculating the laplacian matrix')
 mesh_vol, mesh_surf = a
-L = mesh_surf.get_laplacian_matrix()
-print(L)
+plot_mesh((mesh_surf.get_vertices_collection(), mesh_surf.get_faces_collection(), None, None))
+# L = mesh_surf.get_laplacian_matrix()
+# print(L)
 
 # verts, faces, normals, values = segs[50]
 # mesh = (verts, faces, normals, values)
