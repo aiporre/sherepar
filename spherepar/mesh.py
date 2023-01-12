@@ -62,6 +62,11 @@ class Vertex:
             self._pos = np.array(self._pos)
         return self._pos
 
+    def __str__(self):
+        return f"Vertex(pos={self.pos}, id={self.id})"
+
+    def __repr__(self):
+        return self.__str__()
 
 class EdgeBase:
     pass
@@ -91,6 +96,10 @@ class Edge(EdgeBase):
         else:
             return False
 
+    def __str__(self):
+        return f"Edge(u = {self.u},  v = {self.v})"
+    def __repr__(self):
+        return self.__str__()
 
 class Vector(Edge):
 
@@ -118,6 +127,11 @@ class Vector(Edge):
     def norm(self) -> float:
         return float(np.linalg.norm(self.data))
 
+    def __str__(self):
+        return f"Vector({self.data}, u={self.u.id}, v={self.v.id})"
+
+    def __repr__(self):
+        return f"Vector({self.u}, {self.v})"
 
 class Face:
     def __init__(self, u: Vertex, v: Vertex, w: Vertex):
@@ -169,6 +183,12 @@ class Face:
 
         return self._edges
 
+    def __str__(self):
+        return f"Face(u={self.u}, v={self.v}, w={self.w}, id={self.id})"
+
+    def __repr__(self):
+        return f"Face({self.u}, {self.v}, {self.w}) # with Vector.id={self.id})"
+
 
 class Tetrahedron:
     def __init__(self, u: Vertex, v: Vertex, w: Vertex, m: Vertex):
@@ -177,6 +197,13 @@ class Tetrahedron:
         self.w = w
         self.m = m
         self.id = (u.id, v.id, w.id, m.id)
+
+    def __str__(self):
+        return f"Tetrahedron(u={self.u}, v={self.v}, w={self.w}, m={self.m} id={self.id})"
+
+    def __repr__(self):
+        return f"Face({self.u}, {self.v}, {self.w}, {self.m}) # with Tetra.id={self.id})"
+
 
 
 class Mesh:
@@ -253,6 +280,12 @@ class Mesh:
 
     def get_laplacian_matrix(self):
         raise NotImplementedError
+
+    def __str__(self):
+        return f"Mesh(vertices={len(self.vertices)}*Vertex, edges={len(self.edges)}*Edges, faces={len(self.faces)}*Faces)"
+
+    def __repr__(self):
+        return f"Mesh(vertices={len(self.vertices)}*Vertex, edges={len(self.edges)}*Edges, faces={len(self.faces)}*Faces)"
 
 
 class MeshVolume(Mesh):
