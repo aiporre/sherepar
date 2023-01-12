@@ -15,7 +15,7 @@ from scipy.sparse import coo_matrix
 def get_surface_mesh(data):
     # Use marching cubes to obtain the surface mesh of these ellipsoids
     verts, faces, normals, values = measure.marching_cubes(data, 0)
-    return (verts, faces, normals, values)
+    return MeshFactory.make_mesh('surf', verts, faces)
 
 
 def plot_mesh(mesh):
@@ -91,11 +91,13 @@ class Edge(EdgeBase):
         else:
             return False
 
+
 class Vector(Edge):
 
     def __init__(self, u: Vertex, v: Vertex):
         self.data = u.pos - v.pos
         super(Vector, self).__init__(u, v)
+
     def __eq__(self, other_vector):
         if self.u.id == other_vector.u.id and self.v.id == other_vector.v.id \
                 and self.u.pos == other_vector.u.pos and self.v.pos == other_vector.v.pos:
@@ -110,11 +112,12 @@ class Vector(Edge):
     def cross(self, w: 'Vector') -> 'Vector':
         # u . w , where u is the vector on which w dot product is operated
         uw_pos = np.cross(self.data, w.data)
-        new_vertex = Vertex(uw_pos, self.u.id+self.v.id)
+        new_vertex = Vertex(uw_pos, self.u.id + self.v.id)
         return Vector(self.u, new_vertex)
 
     def norm(self) -> float:
         return float(np.linalg.norm(self.data))
+
 
 class Face:
     def __init__(self, u: Vertex, v: Vertex, w: Vertex):
@@ -198,6 +201,7 @@ class Mesh:
         if e_id in self.edges:
             edge = self.edges[e_id]
         elif (e_id[1], e_id[0]) in self.edges:
+            e_id = (e_id[1], e_id[0])
             edge = self.edges[e_id]
         else:
             return None
@@ -209,6 +213,36 @@ class Mesh:
             return faces_with_edge
         else:
             return None
+
+    def get_vertices_collection(self) -> np.ndarray:
+        values = np.zeros((len(self.vertices), 3))
+        for v in self.vertices.values():
+            values[v.id] = v.pos
+        return values
+
+    def get_edges_collection(self, use_id: bool = True)-> np.ndarray | list[Edge]:
+        if use_id:
+            values = np.zeros((len(self.edges), 2))
+        else:
+            values = []
+        for i, e in enumerate(self.edges.values()):
+            if use_id:
+                values[i] = np.array(e.id)
+            else:
+                values.append(e)
+        return values
+
+    def get_faces_collection(self, use_id: bool = True) -> np.ndarray | list[Edge]:
+        if use_id:
+            values = np.zeros((len(self.faces), 3))
+        else:
+            values = []
+        for i, f in enumerate(self.faces.values()):
+            if use_id:
+                values[i] = np.array(f.id)
+            else:
+                values.append(f)
+        return values
 
     def get_laplacian_matrix(self):
         raise NotImplementedError
@@ -224,41 +258,57 @@ class MeshVolume(Mesh):
 
             faces = [x for x in meshio_obj.cells if x.type == 'triangle'][0]
             _faces = {}
-            for _id, f in enumerate(faces.data):
+            for f in faces.data:
                 u, v, w = _vertices[f[0]], _vertices[f[1]], _vertices[f[2]]
-                _faces[_id] = Face(u, v, w, _id)
+                f_obj = Face(u, v, w)
+                _faces[f_obj.id] = f_obj
 
-            tetras = [x for x in meshio_obj.cells if x.type == 'tetras'][0]
+            tetras = [x for x in meshio_obj.cells if x.type == 'tetra'][0]
             _tetrahedra = {}
-            for _id, t in enumerate(tetras.data):
+            for f in tetras.data:
                 u, v, w, m = _vertices[f[0]], _vertices[f[1]], _vertices[f[2]], _vertices[f[3]]
-                _tetrahedra[_id] = Tetrahedron(u, v, w, m, _id)
+                t_obj = Tetrahedron(u, v, w, m)
+                _tetrahedra[t_obj.id] = t_obj
 
             # extract edges from
             _edges = {}
-            _id = 0
             for tetra in tetras.data:
                 for a, b in zip(tetra[:-1], tetra[1:]):
                     if a > b:
                         a, b = b, a
                     if (a, b) not in _edges:
                         v1, v2 = _vertices[a], _vertices[b]
-                        _edges[(a, b)] = (v1, v2)
-            # class properties
-            self.tetrahedra = _tetrahedra
-            super(MeshVolume, self).__init__(_vertices, _edges, _faces)
+                        e_obj = Edge(v1, v2)
+                        _edges[e_obj.id] = e_obj
+
+        self.tetrahedra = _tetrahedra
+        super(MeshVolume, self).__init__(_vertices, _edges, faces)
+
+
+def get_tetrahedra_collection(self, use_id: bool = True) -> np.ndarray | list[Edge]:
+    if use_id:
+        values = np.zeros((len(self.vertices), 4))
+    else:
+        values = []
+    for i, t in enumerate(self.tetrahedra):
+        if use_id:
+            values[i] = np.array(t.id)
+        else:
+            values.append(t)
+    return values
 
 
 class MeshSurf(Mesh):
     def __init__(self, vertices: list[np.ndarray] | np.ndarray, faces: list[np.ndarray] | np.ndarray):
         _vertices = {}
-        for _id, v in vertices:
+        for _id, v in enumerate(vertices):
             _vertices[_id] = Vertex(v, _id)
         # extract faces
         _faces = {}
-        for _id, f in enumerate(faces):
+        for f in faces:
             u, v, w = _vertices[f[0]], _vertices[f[1]], _vertices[f[2]]
-            _faces[_id] = Face(u, v, w, _id)
+            f_obj = Face(u, v, w)
+            _faces[f_obj.id] = f_obj
 
         # extrac edges from the faces
         _edges = {}
@@ -268,9 +318,10 @@ class MeshSurf(Mesh):
                     a, b = b, a
                 if (a, b) not in _edges:
                     v1, v2 = _vertices[a], _vertices[b]
-                    _edges[(a, b)] = (v1, v2)
+                    e_obj = Edge(v1, v2)
+                    _edges[e_obj.id] = e_obj
 
-        # class properties
+                    # class properties
         super(MeshSurf, self).__init__(_vertices, _edges, _faces)
 
     def get_laplacian_matrix(self, weight: str = 'cotangent'):
@@ -287,7 +338,7 @@ class MeshSurf(Mesh):
             neighbors = self.get_vertex_neighbors(_id)
             values_col = []
             for k in neighbors:
-                face = self.get_edge_faces(v.id, k.id)
+                face = self.get_edge_faces((v.id, k.id))
                 assert len(
                     face) == 2, 'Error calculation of laplacian matrix, wrong definition of faces. Edge has more that one fac'
                 # v---k forms the central vector
@@ -325,12 +376,12 @@ class MeshSurf(Mesh):
                 # alpha_ij
                 u_vec = Vector(a, v)
                 v_vec = Vector(a, k)
-                cotangent_alpha = u_vec.dot(v_vec)/u_vec.cross(v_vec).norm()
+                cotangent_alpha = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
                 # beta_ij
                 u_vec = Vector(b, v)
                 v_vec = Vector(b, k)
-                cotangent_beta= u_vec.dot(v_vec)/u_vec.cross(v_vec).norm()
-                values_col.append((cotangent_alpha+cotangent_beta)/2)
+                cotangent_beta = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
+                values_col.append((cotangent_alpha + cotangent_beta) / 2)
                 index_col.append(v.id)
                 index_row.append(k.id)
             ### once completed the computation of w_ij for all j in neighbors to i we sum to compute the diagonal of L
@@ -340,17 +391,18 @@ class MeshSurf(Mesh):
             index_row.append(v.id)
         return coo_matrix((values, (index_row, index_col)), shape=(max(index_row), max(index_col)))
 
+
 def get_edge_faces(self, id):
     raise NotImplementedError
 
 
 class MeshFactory:
-    def makeMesh(self, mesh_type, *args, **kwargs):
-
+    @staticmethod
+    def make_mesh(mesh_type, *args, **kwargs):
         if mesh_type == 'vol':
-            return 0
+            return MeshVolume(*args, **kwargs)
         elif mesh_type == 'surf':
-            return 1
+            return MeshSurf(*args, **kwargs)
         else:
             valid_mesh_types = ['vol', 'surf']
             raise Exception(f"mesh type {mesh_type} not implemented. Valid options are {valid_mesh_types}.")
@@ -374,8 +426,8 @@ class Segmentation:
                 fname = f.name
                 print('Created temporary file: ', fname)
                 # write mesh surf into a vtk file
-                points = _mesh_surf[0]
-                cells = {'triangle': _mesh_surf[1]}
+                points = _mesh_surf.get_vertices_collection()
+                cells = {'triangle': _mesh_surf.get_faces_collection()}
                 mesh_output = meshio.Mesh(points, cells)
                 mesh_output.write(fname)
                 # convert mesh surface into mesh volume with pygalmesh
@@ -386,6 +438,8 @@ class Segmentation:
                     max_facet_distance=0.008,
                     max_circumradius_edge_ratio=3.0,
                     verbose=False)
-            self.meshes[idx] = mesh_vol
+                mesh_vol = MeshFactory.make_mesh('vol', meshio_obj=mesh_vol)
+
+            self.meshes[idx] = (mesh_vol, _mesh_surf)
 
         return self.meshes[idx]
