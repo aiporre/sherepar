@@ -194,12 +194,12 @@ class Face:
         :return:
         '''
         u, v, w = self.u, self.v, self.w
-        v_a = Vector(u,v)
-        v_b = Vector(u,w)
-        v_c = Vector(v,w)
+        v_a = Vector(u, v)
+        v_b = Vector(u, w)
+        v_c = Vector(v, w)
         a, b, c = v_a.norm(), v_b.norm(), v_c.norm()  # vector lengths
-        s = (a+b+c)/2
-        return math.sqrt(s*(s-a)*(s-b)*(s-c))
+        s = (a + b + c) / 2
+        return math.sqrt(s * (s - a) * (s - b) * (s - c))
 
     def regularity(self) -> float:
         '''
@@ -209,12 +209,12 @@ class Face:
         '''
 
         u, v, w = self.u, self.v, self.w
-        v_a = Vector(u,v)
-        v_b = Vector(u,w)
-        v_c = Vector(v,w)
+        v_a = Vector(u, v)
+        v_b = Vector(u, w)
+        v_c = Vector(v, w)
         a, b, c = v_a.norm(), v_b.norm(), v_c.norm()  # vector lengths
-        reg_1 = np.array([a,b,c])
-        reg_2 = (a+b+c)*np.ones_like(reg_1)/3
+        reg_1 = np.array([a, b, c])
+        reg_2 = (a + b + c) * np.ones_like(reg_1) / 3
         return float(np.linalg.norm(reg_1 - reg_2))
 
     def __str__(self):
@@ -480,7 +480,7 @@ class MeshSurf(Mesh):
         N = max((max(index_row), max(index_col))) + 1
         return coo_matrix((values, (index_row, index_col)), shape=(N, N))
 
-    def _get_laplacian_stretch(self, stretch_function : "StretchFunction") -> coo_matrix:
+    def _get_laplacian_stretch(self, stretch_function: "StretchFunction") -> coo_matrix:
         values = []
         index_row = []
         index_col = []
@@ -514,7 +514,7 @@ class MeshSurf(Mesh):
                 v_vec = Vector(b_s, k)
                 cotangent_beta = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
                 stretch_factor_beta = stretch_function.stretch_factor(face_b)
-                values_col.append((cotangent_alpha/stretch_factor_alpha + cotangent_beta/stretch_factor_beta) / 2)
+                values_col.append((cotangent_alpha / stretch_factor_alpha + cotangent_beta / stretch_factor_beta) / 2)
                 index_col.append(v.id)
                 index_row.append(k.id)
             ### once completed the computation of w_ij for all j in neighbors to i we sum to compute the diagonal of L
@@ -524,6 +524,13 @@ class MeshSurf(Mesh):
             index_row.append(v.id)
         N = max((max(index_row), max(index_col))) + 1
         return coo_matrix((values, (index_row, index_col)), shape=(N, N))
+
+    def get_most_regular_face(self) -> Face:
+        f_best = self.faces[0]
+        for f in self.faces[1:]:
+            if f.regularity() < f_best.regularity():
+                f_best = f
+        return f_best
 
 
 class StretchFunction:
@@ -535,19 +542,19 @@ class StretchFunction:
             x, y, z = v.pos
             # Dummy functions this should be the inverse of the stereographic projection
             return Vertex((x + self.a, y, z), _id=v.id)
+
         if isinstance(cell, Vertex):
             return _stretch_vertex(cell)
         elif isinstance(cell, Face):
-            u_s, v_s, w_s = _stretch_vertex(cell.u), _stretch_vertex(cell.v), _stretch_vertex(cell.w)  # stretch vertices
+            u_s, v_s, w_s = _stretch_vertex(cell.u), _stretch_vertex(cell.v), _stretch_vertex(
+                cell.w)  # stretch vertices
             return Face(u_s, v_s, w_s)  # stretched face
         else:
             raise ValueError(f" Cell instance {type(cell)} is not implemented in this function.")
 
     def stretch_factor(self, face):
         face_s = self.__call__(face)
-        return face.area()/face_s.area()
-
-
+        return face.area() / face_s.area()
 
 
 class MeshFactory:
