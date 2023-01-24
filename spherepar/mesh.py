@@ -175,13 +175,26 @@ class Face:
             triplet_vrtx = [self.u, self.v, self.w]
             self._edges = {}
             for i in range(3):
-                for j in range(i+1, 3):
+                for j in range(i + 1, 3):
                     a, b = triplet_vrtx[i], triplet_vrtx[j]
                     if a.id > b.id:
                         a, b = b, a
                     self._edges[(a.id, b.id)] = (a, b)
 
         return self._edges
+
+    def area(self) -> float:
+        '''
+        Computes area using the Heron's formula
+        :return:
+        '''
+        u, v, w = self.u, self.v, self.w
+        v_a = Vector(u,v)
+        v_b = Vector(u,w)
+        v_c = Vector(v,w)
+        a, b, c = v_a.norm(), v_b.norm(), v_c.norm()  # vector lengths
+        s = (a+b+c)/2
+        return math.sqrt(s*(s-a)*(s-b)*(s-c))
 
     def __str__(self):
         return f"Face(u={self.u}, v={self.v}, w={self.w}, id={self.id})"
