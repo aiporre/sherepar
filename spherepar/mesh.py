@@ -390,9 +390,11 @@ class MeshSurf(Mesh):
                     # class properties
         super(MeshSurf, self).__init__(_vertices, _edges, _faces)
 
-    def get_laplacian_matrix(self, weight: str = 'cotangent'):
+    def get_laplacian_matrix(self, weight: str = 'cotangent', *args, **kwargs):
         if weight == 'cotangent':
-            return self._get_laplacian_cotangent()
+            return self._get_laplacian_cotangent(*args, **kwargs)
+        elif weight == 'stretch':
+            return self._get_laplacian_stretch(*args, **kwargs)
         else:
             raise ValueError(f'Weight = {weight} not implemented valid is [cotangent, or ...')
 
@@ -462,20 +464,71 @@ class MeshSurf(Mesh):
         N = max((max(index_row), max(index_col))) + 1
         return coo_matrix((values, (index_row, index_col)), shape=(N, N))
 
+    def _get_laplacian_stretch(self, stretch_function : "StretchFunction") -> coo_matrix:
+        values = []
+        index_row = []
+        index_col = []
+        for _id, v in self.vertices.items():
+            neighbors = self.get_vertex_neighbors(_id)
+            values_col = []
+            for k in neighbors:
+                face = self.get_edge_faces((v.id, k.id))
+                if face is None:
+                    print(f'Edge {(v.id, k.id)} has not two faces. Surface is not a genus-zero closed !')
+                    continue
+                assert len(face) == 2, 'Error calculation of laplacian matrix, wrong definition of faces. ' \
+                                       f'Edge {(v.id, k.id)} must have two faces (now={face} '
+
+                # v---k forms the central vector
+                face_a, face_b = face[0], face[1]
+                # stretch the faces:
+                face_a_s, face_b_s = stretch_function(face_a), stretch_function(face_b)
+                v_s, k_s = stretch_function(v), stretch_function(k)
+                a_s = face_a_s.get_opposite_vertex(v_s.id, k_s.id)
+                b_s = face_b_s.get_opposite_vertex(v_s.id, k_s.id)
+                # a---->v and b----> are the U_vector's in the stretched triangle face
+                # a---->k and b---->k are the V_vector's in the stretched triangle face
+                # alpha_ij(f)
+                u_vec = Vector(a_s, v)
+                v_vec = Vector(a_s, k)
+                cotangent_alpha = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
+                stretch_factor_alpha = stretch_function.stretch_factor(face_a)
+                # beta_ij(f)
+                u_vec = Vector(b_s, v)
+                v_vec = Vector(b_s, k)
+                cotangent_beta = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
+                stretch_factor_beta = stretch_function.stretch_factor(face_b)
+                values_col.append((cotangent_alpha/stretch_factor_alpha + cotangent_beta/stretch_factor_beta) / 2)
+                index_col.append(v.id)
+                index_row.append(k.id)
+            ### once completed the computation of w_ij for all j in neighbors to i we sum to compute the diagonal of L
+            values.extend(values_col)
+            values.append(sum(values_col))
+            index_col.append(v.id)
+            index_row.append(v.id)
+        N = max((max(index_row), max(index_col))) + 1
+        return coo_matrix((values, (index_row, index_col)), shape=(N, N))
+
 
 class StretchFunction:
     def __init__(self):
         self.a = 10
 
-    def __call__(self, vertex: Vertex, *args, **kwargs) -> Vertex:
-        x, y, z = vertex.pos
-        # Dummy functions this should be the inverse of the stereographic projection
-        new_vertex = Vertex((x + self.a, y, z), _id=vertex.id)
-        return new_vertex
+    def __call__(self, cell: Vertex | Face) -> Vertex | Face:
+        def _stretch_vertex(v):
+            x, y, z = v.pos
+            # Dummy functions this should be the inverse of the stereographic projection
+            return Vertex((x + self.a, y, z), _id=v.id)
+        if isinstance(cell, Vertex):
+            return _stretch_vertex(cell)
+        elif isinstance(cell, Face):
+            u_s, v_s, w_s = _stretch_vertex(cell.u), _stretch_vertex(cell.v), _stretch_vertex(cell.w)  # stretch vertices
+            return Face(u_s, v_s, w_s)  # stretched face
+        else:
+            raise ValueError(f" Cell instance {type(cell)} is not implemented in this function.")
 
     def stretch_factor(self, face):
-        u_s, v_s, w_s = self(face.u), self(face.v), self(face.w)  # stretch vertices
-        face_s = Face(u_s, v_s, w_s)  # stretched face
+        face_s = self.__call__(face)
         return face.area()/face_s.area()
 
 
