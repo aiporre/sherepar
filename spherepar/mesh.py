@@ -392,7 +392,7 @@ class MeshSurf(Mesh):
 
     def get_laplacian_matrix(self, weight: str = 'cotangent', *args, **kwargs):
         if weight == 'cotangent':
-            return self._get_laplacian_cotangent(*args, **kwargs)
+            return self._get_laplacian_cotangent()
         elif weight == 'stretch':
             return self._get_laplacian_stretch(*args, **kwargs)
         else:
@@ -532,8 +532,6 @@ class StretchFunction:
         return face.area()/face_s.area()
 
 
-def get_edge_faces(self, id):
-    raise NotImplementedError
 
 
 class MeshFactory:
