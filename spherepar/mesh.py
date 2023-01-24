@@ -69,6 +69,7 @@ class Vertex:
     def __repr__(self):
         return self.__str__()
 
+
 class EdgeBase:
     pass
 
@@ -99,8 +100,10 @@ class Edge(EdgeBase):
 
     def __str__(self):
         return f"Edge(u = {self.u},  v = {self.v})"
+
     def __repr__(self):
         return self.__str__()
+
 
 class Vector(Edge):
 
@@ -133,6 +136,7 @@ class Vector(Edge):
 
     def __repr__(self):
         return f"Vector({self.u}, {self.v})"
+
 
 class Face:
     def __init__(self, u: Vertex, v: Vertex, w: Vertex):
@@ -219,7 +223,6 @@ class Tetrahedron:
         return f"Face({self.u}, {self.v}, {self.w}, {self.m}) # with Tetra.id={self.id})"
 
 
-
 class Mesh:
 
     def __init__(self,
@@ -268,7 +271,7 @@ class Mesh:
             values[v.id] = v.pos
         return values
 
-    def get_edges_collection(self, use_id: bool = True)-> np.ndarray | list[Edge]:
+    def get_edges_collection(self, use_id: bool = True) -> np.ndarray | list[Edge]:
         if use_id:
             values = np.zeros((len(self.edges), 2))
         else:
@@ -328,7 +331,7 @@ class MeshVolume(Mesh):
             _edges = {}
             for tetra in tetras.data:
                 for i in range(4):
-                    for j in range(i+1, 4):
+                    for j in range(i + 1, 4):
                         a, b = tetra[i], tetra[j]
                         if a > b:
                             a, b = b, a
@@ -458,6 +461,22 @@ class MeshSurf(Mesh):
             index_row.append(v.id)
         N = max((max(index_row), max(index_col))) + 1
         return coo_matrix((values, (index_row, index_col)), shape=(N, N))
+
+
+class StretchFunction:
+    def __init__(self):
+        self.a = 10
+
+    def __call__(self, vertex: Vertex, *args, **kwargs) -> Vertex:
+        x, y, z = vertex.pos
+        # Dummy functions this should be the inverse of the stereographic projection
+        new_vertex = Vertex((x + self.a, y, z), _id=vertex.id)
+        return new_vertex
+
+    def stretch_factor(self, face):
+        u_s, v_s, w_s = self(face.u), self(face.v), self(face.w)  # stretch vertices
+        face_s = Face(u_s, v_s, w_s)  # stretched face
+        return face.area()/face_s.area()
 
 
 def get_edge_faces(self, id):
