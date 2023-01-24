@@ -201,6 +201,22 @@ class Face:
         s = (a+b+c)/2
         return math.sqrt(s*(s-a)*(s-b)*(s-c))
 
+    def regularity(self) -> float:
+        '''
+        Applies the most regular function eq 19
+
+        :return: Scalar value of regularity of the triangular face
+        '''
+
+        u, v, w = self.u, self.v, self.w
+        v_a = Vector(u,v)
+        v_b = Vector(u,w)
+        v_c = Vector(v,w)
+        a, b, c = v_a.norm(), v_b.norm(), v_c.norm()  # vector lengths
+        reg_1 = np.array([a,b,c])
+        reg_2 = (a+b+c)*np.ones_like(reg_1)/3
+        return float(np.linalg.norm(reg_1 - reg_2))
+
     def __str__(self):
         return f"Face(u={self.u}, v={self.v}, w={self.w}, id={self.id})"
 
