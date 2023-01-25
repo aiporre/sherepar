@@ -16,6 +16,7 @@ def dirichlet_spherepar(mesh: MeshSurf) -> StretchFunction:
     j = np.array(1.j)
     h_b_zero = np.array([h_b_real, h_b_real, 0]) \
                + np.array([j * (1 - alpha) * h_b_img, j * alpha * h_b_img, -h_b_img])
+
     # calculating the matrices
     def get_indices_I_from_B(num_vertices, set_B):
         return [i for i in range(num_vertices) if i not in set_B]
@@ -23,32 +24,36 @@ def dirichlet_spherepar(mesh: MeshSurf) -> StretchFunction:
     def get_indices_I_B_radius(h, radius=1.2):
         I = []
         for i in range(len(h)):
-            if np.absolute(h) < radius:
+            if np.absolute(h[i]) < radius:
                 I.append(i)
         B = [i for i in range(len(h)) if i not in I]
         return I, B
-    B = a.id, b.id, c.id
+
+    B = [a.id, b.id, c.id]
     N = Ld.shape[0]
     I = get_indices_I_from_B(N, B)
     # solving the linear system of equation
-    A_coeff = Ld[I, I]
-    b_coeff = Ld[I, B].dot(h_b_zero)
+    A_coeff = Ld[I][..., I]
+    b_coeff = -Ld[I][..., B].dot(h_b_zero)
     h_i = np.linalg.solve(A_coeff, b_coeff)
-    count = 0
-    h = np.zeros((N,1))
+    h = np.zeros((N,), dtype=complex)
     h[B] = h_b_zero
     h[I] = h_i
-    while count < 100:
+    count = 0
+    max_iters = 1000
+    while count < max_iters:
         count += 1
         # inversion:
-        h = np.diag(1/np.absolute(h)**2).dot(h)
-        I, B = get_indices_I_B_radius()
+        h = np.diag(1 / np.absolute(h) ** 2).dot(h)
+        I, B = get_indices_I_B_radius(h)
+        if len(B) == 0:
+            print('Converged all vertices under the radius.')
+            break
         # solving again new h_I
-        A_coeff = Ld[I, I]
+        A_coeff = Ld[I][..., I]
         h_b = h[B]
-        b_coeff = Ld[I, B].dot(h_b)
+        b_coeff = -Ld[I][..., B].dot(h_b)
         h_i = np.linalg.solve(A_coeff, b_coeff)
         # update the new values of h_I
         h[I] = h_i
-
-
+    return StretchFunction(mesh, h)
