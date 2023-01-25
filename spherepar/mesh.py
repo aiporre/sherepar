@@ -11,11 +11,12 @@ from nibabel.testing import data_path
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.sparse import coo_matrix
+from spherepar.parametrization import dirichlet_spherepar
 
 
 def get_surface_mesh(data):
     # Use marching cubes to obtain the surface mesh of these ellipsoids
-    verts, faces, normals, values = measure.marching_cubes(data, 0)
+    verts, faces, normals, values = measure.marching_cubes(data, 0, allow_degenerate=False)
     return MeshFactory.make_mesh('surf', verts, faces)
 
 
@@ -526,22 +527,25 @@ class MeshSurf(Mesh):
         return coo_matrix((values, (index_row, index_col)), shape=(N, N))
 
     def get_most_regular_face(self) -> Face:
-        f_best = self.faces[0]
-        for f in self.faces[1:]:
+        f_best = next(iter(self.faces.values()))
+        for f in self.faces.values():
             if f.regularity() < f_best.regularity():
                 f_best = f
         return f_best
 
 
 class StretchFunction:
-    def __init__(self):
-        self.a = 10
+    def __init__(self, mesh, harmonic_map):
+        self.h = harmonic_map
+        self.mesh = mesh
 
     def __call__(self, cell: Vertex | Face) -> Vertex | Face:
         def _stretch_vertex(v):
-            x, y, z = v.pos
-            # Dummy functions this should be the inverse of the stereographic projection
-            return Vertex((x + self.a, y, z), _id=v.id)
+            h_l = self.h[v.id]
+            pos = [2*np.real(h_l)/(np.absolute(h_l)**2+1),
+                   2*np.imag(h_l)/(np.absolute(h_l)**2+1),
+                   (np.absolute(h_l)**2-1)/(np.absolute(h_l)**2+1)]
+            return Vertex(pos, _id=v.id)
 
         if isinstance(cell, Vertex):
             return _stretch_vertex(cell)
