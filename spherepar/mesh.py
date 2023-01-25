@@ -11,7 +11,6 @@ from nibabel.testing import data_path
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.sparse import coo_matrix
-from spherepar.parametrization import dirichlet_spherepar
 
 
 def get_surface_mesh(data):
@@ -596,13 +595,23 @@ class Segmentation:
                 mesh_output = meshio.Mesh(points, cells)
                 mesh_output.write(fname)
                 # convert mesh surface into mesh volume with pygalmesh
-                mesh_vol = pygalmesh.generate_volume_mesh_from_surface_mesh(
-                    fname,
-                    min_facet_angle=25.0,
-                    max_radius_surface_delaunay_ball=0.15,
-                    max_facet_distance=0.008,
-                    max_circumradius_edge_ratio=3.0,
-                    verbose=False)
+                try:
+                    mesh_vol = pygalmesh.generate_volume_mesh_from_surface_mesh(
+                        fname,
+                        min_facet_angle=25.0,
+                        max_radius_surface_delaunay_ball=0.15,
+                        max_facet_distance=0.008,
+                        max_circumradius_edge_ratio=3.0,
+                        verbose=False)
+                except RuntimeError:
+                    mesh_vol = pygalmesh.generate_volume_mesh_from_surface_mesh(
+                        fname,
+                        min_facet_angle=25.0,
+                        max_radius_surface_delaunay_ball=0.15,
+                        max_facet_distance=0.008,
+                        max_circumradius_edge_ratio=3.0,
+                        verbose=False,
+                        reorient=True)
                 mesh_vol = MeshFactory.make_mesh('vol', meshio_obj=mesh_vol)
 
             self.meshes[idx] = (mesh_vol, _mesh_surf)
