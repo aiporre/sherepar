@@ -19,17 +19,20 @@ def get_surface_mesh(data):
     return MeshFactory.make_mesh('surf', verts, faces)
 
 
-def plot_mesh(mesh):
+def plot_mesh(mesh, ax=None):
     verts, faces, _, _ = mesh
 
     # Display resulting triangular mesh using Matplotlib. This can also be done
     # with mayavi (see skimage.measure.marching_cubes_lewiner docstring).
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(111, projection='3d')
+    ax_given = ax is not None
+    if ax is None:
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection='3d')
 
     # Fancy indexing: `verts[faces]` to generate a collection of triangles
     mesh = Poly3DCollection(verts[faces])
     mesh.set_edgecolor('k')
+    mesh.set_facecolor('r')
     ax.add_collection3d(mesh)
 
     ax.set_xlabel("x-axis: a = 6 per ellipsoid")
@@ -41,9 +44,9 @@ def plot_mesh(mesh):
     ax.set_xlim(min(xx), max(xx))  # a = 6 (times two for 2nd ellipsoid)
     ax.set_ylim(min(yy), max(yy))  # b = 10
     ax.set_zlim(min(zz), max(zz))  # c = 16
-
-    plt.tight_layout()
-    plt.show()
+    if not ax_given:
+        plt.tight_layout()
+        plt.show()
 
 
 def get_segments(data, mask=None, num_segments=100):
@@ -573,18 +576,26 @@ class MeshFactory:
 
 
 class Segmentation:
-    def __init__(self, data, mask=None, num_segments=100):
+    def __init__(self, data, mask=None, num_segments=100, only_surface=False):
         self.data = data
         self.segments = get_segments(data, mask=mask, num_segments=num_segments)
-        self.meshes = len(np.unique(self.segments)) * [None]
+        self.meshes = (len(np.unique(self.segments))-1) * [None]
         self.num_segments = num_segments
+        self.only_surface = only_surface
 
     def __len__(self):
         return self.num_segments
 
     def __getitem__(self, idx):
+        # index start in 1 to len(self)
         if self.meshes[idx] is None:
-            _mesh_surf = get_surface_mesh(self.segments == idx)
+            seg_value = idx + 1
+            _mesh_surf = get_surface_mesh(self.segments == seg_value)
+            if self.only_surface:
+                print('Only surface mesh is required, returning the surface mesh')
+                self.meshes[idx] = (None, _mesh_surf)
+                return self.meshes[idx]
+
             # save in vtk file
             with tempfile.NamedTemporaryFile(suffix=".vtk", delete=False) as f:
                 fname = f.name

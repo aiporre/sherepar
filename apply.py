@@ -2,6 +2,7 @@ import os
 import numpy as np
 from spherepar.read import read_nii
 from spherepar.mesh import Segmentation, plot_mesh
+import matplotlib.pyplot as plt
 
 datapath = 'data/T1_brain.nii.gz'
 # datapath = os.path.join(data_path, 'example5d.nii.gz')
@@ -9,17 +10,35 @@ data = read_nii(datapath)
 img = data.copy()
 mask = np.zeros_like(img)
 mask[img>0] = 1
+only_surface = True
 # make segmented image
-segs = Segmentation(img, mask=mask, num_segments=10)
+segs = Segmentation(img, mask=mask, num_segments=10, only_surface=only_surface)
+
+
+
 
 # Use marching cubes to obtain the surface mesh of these ellipsoids
-a = segs[5]
-print('Calculating the laplacian matrix')
-mesh_vol, mesh_surf = a
-plot_mesh((mesh_surf.get_vertices_collection(), mesh_surf.get_faces_collection(), None, None))
-# L = mesh_surf.get_laplacian_matrix()
-# print(L)
-
+# # create a plot 5x5 subplots
+# fig, ax = plt.subplots(2, 5, subplot_kw=dict(projection='3d'))
+# fig.set_size_inches(20, 20)
+# ax = ax.flatten()
+# plot the segmented mesh
+for i in range(len(segs)):
+    a = segs[i]
+    if only_surface:
+        _,  mesh_surf = a
+    else:
+        mesh_vol, mesh_surf = a
+    a = segs[i]
+    # create
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    plot_mesh((mesh_surf.get_vertices_collection(), mesh_surf.get_faces_collection(), None, None), ax=ax)
+    plt.draw()
+    # print('Calculating the laplacian matrix')
+    # L = mesh_surf.get_laplacian_matrix()
+    # print(L)
+plt.show()
 # verts, faces, normals, values = segs[50]
 # mesh = (verts, faces, normals, values)
 # plot_mesh(mesh)
