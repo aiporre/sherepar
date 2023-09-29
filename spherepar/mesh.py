@@ -11,11 +11,34 @@ from nibabel.testing import data_path
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.sparse import coo_matrix
-
+import trimesh
 
 def get_surface_mesh(data):
     # Use marching cubes to obtain the surface mesh of these ellipsoids
-    verts, faces, normals, values = measure.marching_cubes(data, 0, allow_degenerate=False)
+    verts, faces, normals, values = measure.marching_cubes(data, 0.5, allow_degenerate=False)
+
+    # Create a trimesh object
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+    # repair broken faces
+    n = trimesh.repair.broken_faces(mesh)
+    print('Broken faces: ', n)
+    mask = np.ones((mesh.faces.shape[0],), dtype=bool)
+    for i in n:
+        mask[i] = False
+    mesh.update_faces(mask)
+    # fix broken faces
+    n = trimesh.repair.fill_holes(mesh)
+    print('Holes filled: ', n)
+    # Compute the Euler characteristic
+    V = mesh.vertices.shape[0]
+    E = mesh.edges.shape[0]
+    F = mesh.faces.shape[0]
+    chi = V - E + F
+    print('Is watertight: ', mesh.is_watertight, 'Euler characteristic: ', chi)
+
+    # extract new values
+    verts, faces, normals, values = mesh.vertices, mesh.faces, mesh.face_normals, values
+
     return MeshFactory.make_mesh('surf', verts, faces)
 
 
@@ -389,8 +412,12 @@ class MeshSurf(Mesh):
         # extract faces
         _faces = {}
         for f in faces:
+            f.sort()
             u, v, w = _vertices[f[0]], _vertices[f[1]], _vertices[f[2]]
             f_obj = Face(u, v, w)
+            if f_obj.id in _faces:
+                print('Face already in the list', f_obj.id, 'skipping...')
+                continue
             _faces[f_obj.id] = f_obj
 
         # extrac edges from the faces
@@ -430,7 +457,7 @@ class MeshSurf(Mesh):
                     print(f'Edge {(v.id, k.id)} has not two faces. Surface is not a genus-zero closed !')
                     continue
                 assert len(face) == 2, 'Error calculation of laplacian matrix, wrong definition of faces. ' \
-                                       f'Edge {(v.id, k.id)} must have two faces (now={face} '
+                                       f'Edge {(v.id, k.id)} must have two faces (now={face}). Number of faces={len(face)}'
 
                 # v---k forms the central vector
                 face_a, face_b = face[0], face[1]
@@ -496,7 +523,8 @@ class MeshSurf(Mesh):
                     print(f'Edge {(v.id, k.id)} has not two faces. Surface is not a genus-zero closed !')
                     continue
                 assert len(face) == 2, 'Error calculation of laplacian matrix, wrong definition of faces. ' \
-                                       f'Edge {(v.id, k.id)} must have two faces (now={face} '
+                                       f'Edge {(v.id, k.id)} must have two faces (now={face}). N' \
+                                       f'Number of faces={len(face)} '
 
                 # v---k forms the central vector
                 face_a, face_b = face[0], face[1]
@@ -544,9 +572,9 @@ class StretchFunction:
     def __call__(self, cell: Vertex | Face) -> Vertex | Face:
         def _stretch_vertex(v):
             h_l = self.h[v.id]
-            pos = [2*np.real(h_l)/(np.absolute(h_l)**2+1),
-                   2*np.imag(h_l)/(np.absolute(h_l)**2+1),
-                   (np.absolute(h_l)**2-1)/(np.absolute(h_l)**2+1)]
+            pos = [2 * np.real(h_l) / (np.absolute(h_l) ** 2 + 1),
+                   2 * np.imag(h_l) / (np.absolute(h_l) ** 2 + 1),
+                   (np.absolute(h_l) ** 2 - 1) / (np.absolute(h_l) ** 2 + 1)]
             return Vertex(pos, _id=v.id)
 
         if isinstance(cell, Vertex):
@@ -579,7 +607,7 @@ class Segmentation:
     def __init__(self, data, mask=None, num_segments=100, only_surface=False):
         self.data = data
         self.segments = get_segments(data, mask=mask, num_segments=num_segments)
-        self.meshes = (len(np.unique(self.segments))-1) * [None]
+        self.meshes = (len(np.unique(self.segments)) - 1) * [None]
         self.num_segments = num_segments
         self.only_surface = only_surface
 
