@@ -13,28 +13,29 @@ mask[img>0] = 1
 only_surface = True
 # make segmented image
 segs = Segmentation(img, mask=mask, num_segments=100, only_surface=only_surface)
+# a = segs[2]
 
 # plot axis slices of the segmented image
-seg_img = segs.segments
-seg_img_problem = seg_img == 2
-# crop volume to max and min values distict from 0
-# find the indices of the non-zero elements in the volume
-nz = np.nonzero(seg_img_problem)
-# get the minimum and maximum indices along each axis
-min_idx = np.min(nz, axis=1)
-max_idx = np.max(nz, axis=1)
-# crop the volume using the minimum and maximum indices
-seg_img_problem = seg_img_problem[min_idx[0]:max_idx[0]+1, min_idx[1]:max_idx[1]+1, min_idx[2]:max_idx[2]+1]
-# plot x y and z axis slices
-fig, ax = plt.subplots(1, 3)
-fig.set_size_inches(20, 20)
-N = seg_img_problem.shape[0]//2
-ax[0].imshow(seg_img_problem[N, :, :])
-N = seg_img_problem.shape[1]//2
-ax[1].imshow(seg_img_problem[:, N, :])
-N = seg_img_problem.shape[2]//2
-ax[2].imshow(seg_img_problem[:, :, N])
-plt.show()
+# seg_img = segs.segments
+# seg_img_problem = seg_img == 2
+# # crop volume to max and min values distict from 0
+# # find the indices of the non-zero elements in the volume
+# nz = np.nonzero(seg_img_problem)
+# # get the minimum and maximum indices along each axis
+# min_idx = np.min(nz, axis=1)
+# max_idx = np.max(nz, axis=1)
+# # crop the volume using the minimum and maximum indices
+# seg_img_problem = seg_img_problem[min_idx[0]:max_idx[0]+1, min_idx[1]:max_idx[1]+1, min_idx[2]:max_idx[2]+1]
+# # plot x y and z axis slices
+# fig, ax = plt.subplots(1, 3)
+# fig.set_size_inches(20, 20)
+# N = seg_img_problem.shape[0]//2
+# ax[0].imshow(seg_img_problem[N, :, :])
+# N = seg_img_problem.shape[1]//2
+# ax[1].imshow(seg_img_problem[:, N, :])
+# N = seg_img_problem.shape[2]//2
+# ax[2].imshow(seg_img_problem[:, :, N])
+# plt.show()
 
 
 # Use marching cubes to obtain the surface mesh of these ellipsoids
