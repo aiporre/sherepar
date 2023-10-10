@@ -565,12 +565,17 @@ class MeshSurf(Mesh):
 
 
 class StretchFunction:
-    def __init__(self, mesh, harmonic_map):
+    def __init__(self, mesh: Mesh, harmonic_map: np.ndarray):
+        # TODO: change implementation to use a dictionary (id, harmonic_point or complex number)
         self.h = harmonic_map
         self.mesh = mesh
 
     def __call__(self, cell: Vertex | Face) -> Vertex | Face:
         def _stretch_vertex(v):
+            # validate that the vertex is in the mesh. In other words that the v.id is in the mesh
+            # TODO: the validation is not working properly since the id should be necessarity the same as an index.
+            # if v.id not in self.mesh.vertices:
+            #     raise ValueError(f"Vertex {v} is not in the mesh.")
             h_l = self.h[v.id]
             pos = [2 * np.real(h_l) / (np.absolute(h_l) ** 2 + 1),
                    2 * np.imag(h_l) / (np.absolute(h_l) ** 2 + 1),
