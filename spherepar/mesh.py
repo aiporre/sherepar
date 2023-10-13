@@ -1,5 +1,6 @@
 import math
 import os
+from collections import OrderedDict
 import tempfile
 import numpy as np
 import nibabel as nb
@@ -351,7 +352,7 @@ class MeshVolume(Mesh):
     def __init__(self, *args, **kwargs):
         if "meshio_obj":
             meshio_obj = kwargs['meshio_obj']
-            _vertices = {}
+            _vertices = OrderedDict()
             for _id, v in enumerate(meshio_obj.points):
                 _vertices[_id] = Vertex(v, _id)
 
@@ -406,7 +407,7 @@ class MeshVolume(Mesh):
 
 class MeshSurf(Mesh):
     def __init__(self, vertices: list[np.ndarray] | np.ndarray, faces: list[np.ndarray] | np.ndarray):
-        _vertices = {}
+        _vertices = OrderedDict()
         for _id, v in enumerate(vertices):
             _vertices[_id] = Vertex(v, _id)
         # extract faces
