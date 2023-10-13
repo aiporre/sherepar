@@ -1,4 +1,8 @@
+from typing import Any
+
 import numpy as np
+from numpy import ndarray, dtype, floating
+from numpy._typing import _64Bit
 
 from spherepar.mesh import MeshSurf, StretchFunction, Vector, Vertex
 
@@ -57,3 +61,48 @@ def dirichlet_spherepar(mesh: MeshSurf) -> StretchFunction:
         # update the new values of h_I
         h[I] = h_i
     return StretchFunction(mesh, h)
+
+def stereo_projection(vertex: Vertex) -> ndarray[Any, dtype[floating[_64Bit]]]:
+    j = np.array(1.j)
+    return (vertex.pos[0]+ j*vertex.pos[1]) / (1 - vertex.pos[2])
+def strech_paremetrization(mesh: MeshSurf) -> StretchFunction:
+    # the initial mapping is a dirichlet energy minimization aka dirichlet_s
+    dirichlet_stretch = dirichlet_spherepar(mesh)
+    # strereo-graphic projection of the mesh
+    vertices = mesh.get_vertices_collection()
+    strech_vertices = [dirichlet_stretch(v) for v in vertices]
+    # create a list of sterep-graphic projected vertices
+    h = np.array([stereo_projection(v) for v in strech_vertices])
+    # while max iterations reached
+    count = 0
+    max_iters = 1000
+    
+    def get_indices_I_B_radius(h, radius=1.2):
+        I = []
+        for i in range(len(h)):
+            if np.absolute(h[i]) < radius:
+                I.append(i)
+        B = [i for i in range(len(h)) if i not in I]
+        return I, B
+
+    while count < max_iters:
+        count += 1
+        # Update linear equation matrices A with the laplacian stretch matrix
+        Ls = mesh.get_laplacian_matrix(weight="stretch", stretch=h).toarray()
+        # inversion:
+        h = np.diag(1 / np.absolute(h) ** 2).dot(h)
+        I, B = get_indices_I_B_radius(h)
+        if len(B) == 0:
+            print('Converged all vertices under the radius.')
+            break
+        # solving again new h_I
+        A_coeff = Ls[I][..., I]
+        h_b = h[B]
+        b_coeff = -Ls[I][..., B].dot(h_b)
+        h_i = np.linalg.solve(A_coeff, b_coeff)
+        # update the new values of h_I
+        h[I] = h_i
+        mesh.set_stretch(h)
+        # update h values
+        h = mesh.get_stereo()
+
