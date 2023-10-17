@@ -571,6 +571,21 @@ class StretchFunction:
         self.h = harmonic_map
         self.mesh = mesh
 
+    @property
+    def h(self):
+        return self._h
+
+    @h.setter
+    def h(self, harmonic_map):
+        # validate that the harmonic map is a complex number with the same number of elements as the number of vertices
+        if not isinstance(harmonic_map, np.ndarray):
+            raise ValueError(f"Harmonic map must be a numpy array, not {type(harmonic_map)}")
+        if harmonic_map.dtype != np.complex128:
+            raise ValueError(f"Harmonic map must be a complex number, not {harmonic_map.dtype}")
+        if len(harmonic_map) != len(self.mesh.vertices):
+            raise ValueError(f"Harmonic map must have the same number of elements as the number of vertices in the mesh.")
+        self._h = harmonic_map
+
     def __call__(self, cell: Vertex | Face) -> Vertex | Face:
         def _stretch_vertex(v):
             # validate that the vertex is in the mesh. In other words that the v.id is in the mesh

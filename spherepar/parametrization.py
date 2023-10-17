@@ -62,9 +62,18 @@ def dirichlet_spherepar(mesh: MeshSurf) -> StretchFunction:
         h[I] = h_i
     return StretchFunction(mesh, h)
 
+
 def stereo_projection(vertex: Vertex) -> ndarray[Any, dtype[floating[_64Bit]]]:
+    """
+    Stereographic projection of a vertex
+    :param vertex:
+    :return:
+        ndarray[Any, type[complex[float64]]]
+    """
     j = np.array(1.j)
-    return (vertex.pos[0]+ j*vertex.pos[1]) / (1 - vertex.pos[2])
+    return (vertex.pos[0] + j * vertex.pos[1]) / (1 - vertex.pos[2])
+
+
 def strech_paremetrization(mesh: MeshSurf) -> StretchFunction:
     # the initial mapping is a dirichlet energy minimization aka dirichlet_s
     dirichlet_stretch = dirichlet_spherepar(mesh)
@@ -76,7 +85,7 @@ def strech_paremetrization(mesh: MeshSurf) -> StretchFunction:
     # while max iterations reached
     count = 0
     max_iters = 1000
-    
+
     def get_indices_I_B_radius(h, radius=1.2):
         I = []
         for i in range(len(h)):
@@ -102,7 +111,10 @@ def strech_paremetrization(mesh: MeshSurf) -> StretchFunction:
         h_i = np.linalg.solve(A_coeff, b_coeff)
         # update the new values of h_I
         h[I] = h_i
-        mesh.set_stretch(h)
+        # update the stretch function
+        dirichlet_stretch.h = h
         # update h values
-        h = mesh.get_stereo()
+        strech_vertices = [dirichlet_stretch(v) for v in vertices]
+        h = np.array([stereo_projection(v) for v in strech_vertices])
 
+    return dirichlet_stretch
