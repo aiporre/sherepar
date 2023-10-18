@@ -74,12 +74,11 @@ def stereo_projection(vertex: Vertex) -> ndarray[Any, dtype[floating[_64Bit]]]:
     return (vertex.pos[0] + j * vertex.pos[1]) / (1 - vertex.pos[2])
 
 
-def strech_paremetrization(mesh: MeshSurf) -> StretchFunction:
+def stretch_paremetrization(mesh: MeshSurf) -> StretchFunction:
     # the initial mapping is a dirichlet energy minimization aka dirichlet_s
     dirichlet_stretch = dirichlet_spherepar(mesh)
     # strereo-graphic projection of the mesh
-    vertices = mesh.get_vertices_collection()
-    strech_vertices = [dirichlet_stretch(v) for v in vertices]
+    strech_vertices = [dirichlet_stretch(v) for v in mesh.vertices.values()]
     # create a list of sterep-graphic projected vertices
     h = np.array([stereo_projection(v) for v in strech_vertices])
     # while max iterations reached
@@ -97,7 +96,7 @@ def strech_paremetrization(mesh: MeshSurf) -> StretchFunction:
     while count < max_iters:
         count += 1
         # Update linear equation matrices A with the laplacian stretch matrix
-        Ls = mesh.get_laplacian_matrix(weight="stretch", stretch=h).toarray()
+        Ls = mesh.get_laplacian_matrix(weight="stretch", stretch_function=dirichlet_stretch).toarray()
         # inversion:
         h = np.diag(1 / np.absolute(h) ** 2).dot(h)
         I, B = get_indices_I_B_radius(h)
@@ -114,7 +113,7 @@ def strech_paremetrization(mesh: MeshSurf) -> StretchFunction:
         # update the stretch function
         dirichlet_stretch.h = h
         # update h values
-        strech_vertices = [dirichlet_stretch(v) for v in vertices]
+        strech_vertices = [dirichlet_stretch(v) for v in mesh.vertices.values()]
         h = np.array([stereo_projection(v) for v in strech_vertices])
 
     return dirichlet_stretch
