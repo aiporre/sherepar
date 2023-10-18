@@ -14,6 +14,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.sparse import coo_matrix
 import trimesh
 
+
 def get_surface_mesh(data):
     # Use marching cubes to obtain the surface mesh of these ellipsoids
     verts, faces, normals, values = measure.marching_cubes(data, 0.5, allow_degenerate=False)
@@ -511,7 +512,7 @@ class MeshSurf(Mesh):
         N = max((max(index_row), max(index_col))) + 1
         return coo_matrix((values, (index_row, index_col)), shape=(N, N))
 
-    def _get_laplacian_stretch(self, stretch_function: "StretchFunction") -> coo_matrix:
+    def _get_laplacian_stretch(self, stretch_function: "StretchFunction", *args, **kwargs) -> coo_matrix:
         values = []
         index_row = []
         index_col = []
@@ -568,8 +569,8 @@ class MeshSurf(Mesh):
 class StretchFunction:
     def __init__(self, mesh: Mesh, harmonic_map: np.ndarray):
         # TODO: change implementation to use a dictionary (id, harmonic_point or complex number)
-        self.h = harmonic_map
         self.mesh = mesh
+        self.h = harmonic_map
 
     @property
     def h(self):
@@ -583,7 +584,8 @@ class StretchFunction:
         if harmonic_map.dtype != np.complex128:
             raise ValueError(f"Harmonic map must be a complex number, not {harmonic_map.dtype}")
         if len(harmonic_map) != len(self.mesh.vertices):
-            raise ValueError(f"Harmonic map must have the same number of elements as the number of vertices in the mesh.")
+            raise ValueError(
+                f"Harmonic map must have the same number of elements as the number of vertices in the mesh.")
         self._h = harmonic_map
 
     def __call__(self, cell: Vertex | Face) -> Vertex | Face:
@@ -605,9 +607,16 @@ class StretchFunction:
                 cell.w)  # stretch vertices
             return Face(u_s, v_s, w_s)  # stretched face
         else:
-            raise ValueError(f" Cell instance {type(cell)} is not implemented in this function.")
+            raise ValueError(f" Cell instance {type(cell)} is not implemented in the StretchFunction .")
 
-    def stretch_factor(self, face):
+    def stretch_factor(self, face: Face) -> float:
+        """
+        Computes the stretch factor of a face, as the given in the following equation:
+            $$\sigma_{f^{-1}(\tau)} = \frac{\tau}{f(\tau)}$$
+        It is a measurment of the local stretch of the face, by the map $f$.
+        :param face:
+        :return:
+        """
         face_s = self.__call__(face)
         return face.area() / face_s.area()
 
