@@ -22,7 +22,7 @@ class TestMeshSurf(unittest.TestCase):
         self.assertTrue(faces_collection.dtype == np.dtype(np.int32))
         plot_mesh((mesh_surf.get_vertices_collection(), mesh_surf.get_faces_collection(), None, None))
 
-    def test_get_xyz_collections(self):
+    def test_get_xyz_collections_v2(self):
         basic_form = ellipsoid(6, 10, 16, levelset=True)
         print('basic form shape: is a box with points: ', basic_form.shape)
         mesh_surf = get_surface_mesh(basic_form)
