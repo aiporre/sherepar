@@ -29,7 +29,8 @@ def plot_slices_vol(volume: np.ndarray, ax=None):
     return ax
 
 
-def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, image_size: int = 100, ax: plt.Axes = None):
+def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, image_size: int = 100,
+                  ax: plt.Axes = None):
     """
     Render a volume as a 2D image.
 
@@ -40,6 +41,7 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
     :return:
         Nothing, but shows the rendered image
     """
+
     def transferFunction(x):
         r = 1.0 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.1 * np.exp(
             -(x - -3.0) ** 2 / 0.5)
@@ -70,7 +72,7 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
     # compute the new volume
     image_render = np.zeros((image_size, image_size, 3))
     volume_render = interpn(points, volume, points_render, method='linear', bounds_error=False, fill_value=0)
-    img_aux = np.zeros((image_size, image_size, 3))  # auxiliar image to allocate memory
+    img_aux = np.zeros((image_size, image_size, 3))  # auxiliary image to allocate memory
     for data_slice in volume_render:
         r, g, b, a = transferFunction(np.log(data_slice))
         img_aux[:, :, 0] = r
