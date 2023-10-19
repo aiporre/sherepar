@@ -1,5 +1,9 @@
+from typing import Any
+
 import numpy as np
 import matplotlib.pyplot as plt
+from numpy import ndarray, dtype, floating, float_
+from numpy._typing import _64Bit
 from scipy.interpolate import interpn
 
 
@@ -21,6 +25,8 @@ def plot_slices_vol(volume: np.ndarray, ax=None):
         fig, ax = plt.subplots(1, 3)
         fig.set_size_inches(20, 20)
     N = volume.shape[0] // 2
+    if ax is None:
+        fig, ax = plt.subplots(1, 3)
     ax[0].imshow(volume[N, :, :])
     N = volume.shape[1] // 2
     ax[1].imshow(volume[:, N, :])
@@ -71,15 +77,22 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
     points_render = np.array([x_render.ravel(), y_render.ravel(), z_render.ravel()]).T
     # compute the new volume
     image_render = np.zeros((image_size, image_size, 3))
-    volume_render = interpn(points, volume, points_render, method='linear', bounds_error=False, fill_value=0)
+    volume_render = interpn(points, volume, points_render, method='linear', bounds_error=False, fill_value=0).reshape(image_size, image_size, image_size)
     img_aux = np.zeros((image_size, image_size, 3))  # auxiliary image to allocate memory
+    a_aux: ndarray[Any, dtype[floating[_64Bit] | float_]] = np.zeros((image_size, image_size, 3))  # auxiliary image to allocate memory
     for data_slice in volume_render:
         r, g, b, a = transferFunction(np.log(data_slice))
         img_aux[:, :, 0] = r
         img_aux[:, :, 1] = g
         img_aux[:, :, 2] = b
-        image_render = (1 - a) * image_render + a * img_aux
-    image_render = np.clip(image_render, 0, 1)
+        a_aux[:, :, 0] = a
+        a_aux[:, :, 1] = a
+        a_aux[:, :, 2] = a
+        image_render = (1 - a_aux) * image_render + a_aux * img_aux
+
+    print('------>>>> ', image_render.max())
+    # image_render = np.clip(image_render, 0, 1)
+    image_render = (image_render - image_render.min()) / (image_render.max()-image_render.min())
     # plot image render
     if ax is None:
         fig, ax = plt.subplots()
