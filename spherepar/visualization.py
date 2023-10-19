@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interpn
 
 
-def plot_slices_vol(volume: np.ndarray):
+def plot_slices_vol(volume: np.ndarray, ax=None):
     """
     Plot the x, y and z axis slices of a volume.
     :param volume:
@@ -17,18 +17,19 @@ def plot_slices_vol(volume: np.ndarray):
     # crop the volume using the minimum and maximum indices
     volume = volume[min_idx[0]:max_idx[0] + 1, min_idx[1]:max_idx[1] + 1, min_idx[2]:max_idx[2] + 1]
     # plot x y and z axis slices
-    fig, ax = plt.subplots(1, 3)
-    fig.set_size_inches(20, 20)
+    if ax is None:
+        fig, ax = plt.subplots(1, 3)
+        fig.set_size_inches(20, 20)
     N = volume.shape[0] // 2
     ax[0].imshow(volume[N, :, :])
     N = volume.shape[1] // 2
     ax[1].imshow(volume[:, N, :])
     N = volume.shape[2] // 2
     ax[2].imshow(volume[:, :, N])
-    plt.show()
+    return ax
 
 
-def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, image_size: int = 100):
+def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, image_size: int = 100, ax: plt.Axes = None):
     """
     Render a volume as a 2D image.
 
@@ -78,7 +79,8 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
         image_render = (1 - a) * image_render + a * img_aux
     image_render = np.clip(image_render, 0, 1)
     # plot image render
-    plt.imshow(image_render)
-    # turn off axis
+    if ax is None:
+        fig, ax = plt.subplots()
+    ax.imshow(image_render)
     plt.axis('off')
-    plt.show()
+    return ax
