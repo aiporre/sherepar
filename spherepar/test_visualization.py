@@ -3,7 +3,7 @@ import unittest
 from matplotlib import pyplot as plt
 import numpy as np
 from spherepar.visualization import render_volume, plot_slices_vol
-from skimage.draw import ellipsoid
+# from skimage.draw import ellipsoid
 import h5py as h5
 
 class TestVisualization(unittest.TestCase):

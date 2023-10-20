@@ -34,6 +34,52 @@ def plot_slices_vol(volume: np.ndarray, ax=None):
     ax[2].imshow(volume[:, :, N])
     return ax
 
+def generate_transfer_function(values: tuple[float, ...], colors: tuple[str,...], alphas: tuple[float, ...]):
+    # validate the max number values, colors and alphas is not greater than 3
+    assert len(values) <= 3, 'The number of values must be less or equal than 3'
+    assert len(colors) <= 3, 'The number of colors must be less or equal than 3'
+    assert len(alphas) <= 3, 'The number of alphas must be less or equal than 3'
+    colors = [colors.replace('#', '') for colors in colors]
+    colors = [tuple(int(colors[i][j:j + 2], 16)/255.0 for j in (0, 2, 4)) for i in range(len(colors))]
+    if len(values) == 1:
+        c = colors[0]
+        def transferFunction(x):
+            r = c[0] * np.exp(-(x - values[0]) ** 2 / 1.0)
+            g = c[1] * np.exp(-(x - values[0]) ** 2 / 1.0)
+            b = c[2] * np.exp(-(x - values[0]) ** 2 / 1.0)
+            a = alphas[0] * np.exp(-(x - values[0]) ** 2 / 1.0)
+            return r, g, b, a
+        return transferFunction
+    elif len(values) == 2:
+        c1, c2 = colors
+        def transferFunction(x):
+            r = c1[0] * np.exp(-(x - values[0]) ** 2 / 1.0) + c2[0] * np.exp(-(x - values[1]) ** 2 / 1.0)
+            g = c1[1] * np.exp(-(x - values[0]) ** 2 / 1.0) + c2[1] * np.exp(-(x - values[1]) ** 2 / 1.0)
+            b = c1[2] * np.exp(-(x - values[0]) ** 2 / 1.0) + c2[2] * np.exp(-(x - values[1]) ** 2 / 1.0)
+            a = alphas[0] * np.exp(-(x - values[0]) ** 2 / 1.0) + alphas[1] * np.exp(-(x - values[1]) ** 2 / 1.0)
+            return r, g, b, a
+        return transferFunction
+    else:
+        # convert colors text hex into rgb
+        c1, c2, c3 = colors
+        def transferFunction(x):
+            r = c1[0] * np.exp(-(x - values[0]) ** 2 / 1.0) + c2[0] * np.exp(-(x - values[1]) ** 2 / 1.0) + c3[0] * np.exp(-(x - values[2]) ** 2 / 1.0)
+            g = c1[1] * np.exp(-(x - values[0]) ** 2 / 1.0) + c2[1] * np.exp(-(x - values[1]) ** 2 / 1.0) + c3[1] * np.exp(-(x - values[2]) ** 2 / 1.0)
+            b = c1[2] * np.exp(-(x - values[0]) ** 2 / 1.0) + c2[2] * np.exp(-(x - values[1]) ** 2 / 1.0) + c3[2] * np.exp(-(x - values[2]) ** 2 / 1.0)
+            a = alphas[0] * np.exp(-(x - values[0]) ** 2 / 1.0) + alphas[1] * np.exp(-(x - values[1]) ** 2 / 1.0) + alphas[2] * np.exp(-(x - values[2]) ** 2 / 1.0)
+            return r, g, b, a
+        return transferFunction
+        # def transferFunction(x):
+        #     r = 1.0 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.1 * np.exp(
+        #         -(x - -3.0) ** 2 / 0.5)
+        #     g = 1.0 * np.exp(-(x - 9.0) ** 2 / 1.0) + 1.0 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.1 * np.exp(
+        #         -(x - -3.0) ** 2 / 0.5)
+        #     b = 0.1 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 1.0 * np.exp(
+        #         -(x - -3.0) ** 2 / 0.5)
+        #     a = 0.6 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.01 * np.exp(
+        #         -(x - -3.0) ** 2 / 0.5)
+        #     return r, g, b, a
+        return transferFunction
 
 def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, image_size: int = 100,
                   ax: plt.Axes = None):
@@ -48,16 +94,16 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
         Nothing, but shows the rendered image
     """
 
-    def transferFunction(x):
-        r = 1.0 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.1 * np.exp(
-            -(x - -3.0) ** 2 / 0.5)
-        g = 1.0 * np.exp(-(x - 9.0) ** 2 / 1.0) + 1.0 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.1 * np.exp(
-            -(x - -3.0) ** 2 / 0.5)
-        b = 0.1 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 1.0 * np.exp(
-            -(x - -3.0) ** 2 / 0.5)
-        a = 0.6 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.01 * np.exp(
-            -(x - -3.0) ** 2 / 0.5)
-        return r, g, b, a
+    # def transferFunction(x):
+    #     r = 1.0 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.1 * np.exp(
+    #         -(x - -3.0) ** 2 / 0.5)
+    #     g = 1.0 * np.exp(-(x - 9.0) ** 2 / 1.0) + 1.0 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.1 * np.exp(
+    #         -(x - -3.0) ** 2 / 0.5)
+    #     b = 0.1 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 1.0 * np.exp(
+    #         -(x - -3.0) ** 2 / 0.5)
+    #     a = 0.6 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.01 * np.exp(
+    #         -(x - -3.0) ** 2 / 0.5)
+    #     return r, g, b, a
 
     # get the x, y and z coordinates centered middle of the volume
     Nx, Ny, Nz = volume.shape
@@ -75,9 +121,14 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
         elevation)
     # compute new grid in the x, y, z render cords
     points_render = np.array([x_render.ravel(), y_render.ravel(), z_render.ravel()]).T
+    # get transfer function
+    transferFunction = generate_transfer_function([0.1,0.5,0.9],
+                                                  ['#ffff0a', '#0affff', '#ff0aff'],
+                                                  [0.1,0.1,0.9])
     # compute the new volume
     image_render = np.zeros((image_size, image_size, 3))
     volume_render = interpn(points, volume, points_render, method='linear', bounds_error=False, fill_value=0).reshape(image_size, image_size, image_size)
+    # TODO: assert data has no negative values
     img_aux = np.zeros((image_size, image_size, 3))  # auxiliary image to allocate memory
     a_aux: ndarray[Any, dtype[floating[_64Bit] | float_]] = np.zeros((image_size, image_size, 3))  # auxiliary image to allocate memory
     for data_slice in volume_render:
