@@ -82,7 +82,8 @@ def generate_transfer_function(values: tuple[float, ...], colors: tuple[str,...]
         return transferFunction
 
 def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, image_size: int = 100,
-                  ax: plt.Axes = None):
+                  ax: plt.Axes = None, values: list = [0, 1, 2],
+                  colors: list = ['#ff0000', '#00ff00', '#0000ff'], alphas: list = [0.1, 0.1, 0.1]):
     """
     Render a volume as a 2D image.
 
@@ -122,9 +123,7 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
     # compute new grid in the x, y, z render cords
     points_render = np.array([x_render.ravel(), y_render.ravel(), z_render.ravel()]).T
     # get transfer function
-    transferFunction = generate_transfer_function([0.1,0.5,0.9],
-                                                  ['#ffff0a', '#0affff', '#ff0aff'],
-                                                  [0.1,0.1,0.9])
+    transferFunction = generate_transfer_function(values, colors, alphas)
     # compute the new volume
     image_render = np.zeros((image_size, image_size, 3))
     volume_render = interpn(points, volume, points_render, method='linear', bounds_error=False, fill_value=0).reshape(image_size, image_size, image_size)
