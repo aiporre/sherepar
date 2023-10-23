@@ -83,7 +83,7 @@ def generate_transfer_function(values: tuple[float, ...], colors: tuple[str,...]
 
 def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, image_size: int = 100,
                   ax: plt.Axes = None, values: list = [0, 1, 2],
-                  colors: list = ['#ff0000', '#00ff00', '#0000ff'], alphas: list = [0.1, 0.1, 0.1]):
+                  colors: list = ['#ff0000', '#00ff00', '#0000ff'], alphas: list = [0.1, 0.1, 0.1], degrees=True):
     """
     Render a volume as a 2D image.
 
@@ -105,6 +105,11 @@ def render_volume(volume: np.ndarray, azimuth: float = 0, elevation: float = 0, 
     #     a = 0.6 * np.exp(-(x - 9.0) ** 2 / 1.0) + 0.1 * np.exp(-(x - 3.0) ** 2 / 0.1) + 0.01 * np.exp(
     #         -(x - -3.0) ** 2 / 0.5)
     #     return r, g, b, a
+
+    # convert degrees to radians
+    if degrees:
+        azimuth = np.deg2rad(azimuth)
+        elevation = np.deg2rad(elevation)
 
     # get the x, y and z coordinates centered middle of the volume
     Nx, Ny, Nz = volume.shape
