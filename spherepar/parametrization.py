@@ -7,7 +7,7 @@ from numpy._typing import _64Bit
 from spherepar.mesh import MeshSurf, StretchFunction, Vector, Vertex
 
 
-def dirichlet_spherepar(mesh: MeshSurf) -> StretchFunction:
+def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
     face_reg = mesh.get_most_regular_face()
     # Laplacian matrix dirichlet energy, i.e. cotangent formula for weights
     Ld = mesh.get_laplacian_matrix(weight="cotangent").toarray()
@@ -74,9 +74,9 @@ def stereo_projection(vertex: Vertex) -> ndarray[Any, dtype[floating[_64Bit]]]:
     return (vertex.pos[0] + j * vertex.pos[1]) / (1 - vertex.pos[2])
 
 
-def stretch_paremetrization(mesh: MeshSurf) -> StretchFunction:
+def stretch_parametrization(mesh: MeshSurf) -> StretchFunction:
     # the initial mapping is a dirichlet energy minimization aka dirichlet_s
-    dirichlet_stretch = dirichlet_spherepar(mesh)
+    dirichlet_stretch = dirichlet_parametrization(mesh)
     # strereo-graphic projection of the mesh
     strech_vertices = [dirichlet_stretch(v) for v in mesh.vertices.values()]
     # create a list of sterep-graphic projected vertices

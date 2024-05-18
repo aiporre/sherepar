@@ -2,7 +2,7 @@ from unittest import TestCase
 from skimage import measure
 from skimage.draw import ellipsoid
 from spherepar.mesh import *
-from spherepar.parametrization import dirichlet_spherepar, stretch_paremetrization
+from spherepar.parametrization import dirichlet_parametrization, stretch_parametrization
 class Test(TestCase):
     def test_dirichlet_spherepar(self):
         basic_form = ellipsoid(6, 10, 16, levelset=True)
@@ -19,7 +19,7 @@ class Test(TestCase):
         # L = mesh_surf.get_laplacian_matrix()
         # self.assertEqual(L.sum(), 628.316737134868)
         # self.assertAlmostEqual((L - L.transpose()).sum(), 0)
-        harmonic_par = dirichlet_spherepar(mesh_surf)
+        harmonic_par = dirichlet_parametrization(mesh_surf)
 
     def test_strech_spherepar(self):
         basic_form = ellipsoid(6, 10, 16, levelset=True)
@@ -36,4 +36,4 @@ class Test(TestCase):
         # L = mesh_surf.get_laplacian_matrix()
         # self.assertEqual(L.sum(), 628.316737134868)
         # self.assertAlmostEqual((L - L.transpose()).sum(), 0)
-        harmonic_par = stretch_paremetrization(mesh_surf)
+        harmonic_par = stretch_parametrization(mesh_surf)
