@@ -620,6 +620,22 @@ class StretchFunction:
         face_s = self.__call__(face)
         return face.area() / face_s.area()
 
+    def __str__(self) -> str:
+        return f"StretchFunction(mesh={self.mesh}, harmonic_map={self.h})"
+
+    def __repr__(self) -> str:
+        return f"StretchFunction(mesh={self.mesh}, harmonic_map={self.h})"
+
+    def convert_mesh(self) -> Mesh:
+        vertices = []
+        faces = []
+        for v in self.mesh.vertices.values():
+            vertices.append(self(v).pos)
+        for f in self.mesh.faces.values():
+            faces.append(np.array([f.u.id, f.v.id, f.w.id]))
+        return MeshSurf(vertices, faces)
+
+
 
 class MeshFactory:
     @staticmethod
