@@ -46,11 +46,12 @@ def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
     h[B] = h_b_zero
     h[I] = h_i
     count = 0
-    max_iters = 1000
+    max_iters = 0
     while count < max_iters:
         count += 1
         # inversion:
         h = np.diag(1 / np.absolute(h) ** 2).dot(h)
+        break
         I, B = get_indices_I_B_radius(h)
         if len(B) == 0:
             print('Converged all vertices under the radius.')
