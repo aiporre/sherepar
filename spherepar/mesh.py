@@ -155,8 +155,11 @@ class Vector(Edge):
     def cross(self, w: 'Vector') -> 'Vector':
         # u . w , where u is the vector on which w dot product is operated
         uw_pos = np.cross(self.data, w.data)
+        # find common point
+
         new_vertex = Vertex(uw_pos, self.u.id + self.v.id)
-        return Vector(self.u, new_vertex)
+        origin = Vertex(np.zeros_like(uw_pos), self.u.id + self.v.id)
+        return Vector(new_vertex, origin)
 
     def norm(self) -> float:
         return float(np.linalg.norm(self.data))
@@ -453,10 +456,13 @@ class MeshSurf(Mesh):
         index_row = []
         index_col = []
         for _id, v in self.vertices.items():
+            # print('id = ;', _id)
             neighbors = self.get_vertex_neighbors(_id)
+            # print('neighbors: ', neighbors)
             values_col = []
             for k in neighbors:
                 face = self.get_edge_faces((v.id, k.id))
+                # print(f'faces neighbors for {v.id} and {k.id} are {face[0].id, face[1].id}')
                 if face is None:
                     print(f'Edge {(v.id, k.id)} has not two faces. Surface is not a genus-zero closed !')
                     continue
@@ -499,18 +505,28 @@ class MeshSurf(Mesh):
                 u_vec = Vector(a, v)
                 v_vec = Vector(a, k)
                 cotangent_alpha = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
+                # print('case a: u_vec', u_vec, 'v_vec = ', v_vec, 'cotangent_alpha = ', cotangent_alpha)
                 # beta_ij
                 u_vec = Vector(b, v)
                 v_vec = Vector(b, k)
                 cotangent_beta = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
-                values_col.append((cotangent_alpha + cotangent_beta) / 2)
+                # print('case a: u_vec', u_vec, 'v_vec', v_vec, 'cotangent_beta = ', cotangent_beta)
+                values_col.append(-(cotangent_alpha + cotangent_beta) / 2) # L[i,j] = -w_ij = -1/2 (cot(alpha_ij) + cot(beta_ij))
                 index_col.append(v.id)
                 index_row.append(k.id)
+            # print('values without the diagonal: ')
+            # print('values_col: ', values_col)
+            # print('index_col: ', index_col)
+            # print('index_row: ', index_row)
             ### once completed the computation of w_ij for all j in neighbors to i we sum to compute the diagonal of L
             values.extend(values_col)
-            values.append(sum(values_col))
+            values.append(-1*sum(values_col)) # sum w_ij
             index_col.append(v.id)
             index_row.append(v.id)
+            # print('values with the diagonal: ')
+            # print('values: ', values)
+            # print('index_col: ', index_col)
+            # print('index_row: ', index_row)
         N = max((max(index_row), max(index_col))) + 1
         return coo_matrix((values, (index_row, index_col)), shape=(N, N))
 

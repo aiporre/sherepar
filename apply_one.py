@@ -20,8 +20,8 @@ def main(mesh_path):
     sphere = mesh
     # compute the parameterization
     # stretch = stretch_parametrization(mesh)
-    # stretch = dirichlet_parametrization(mesh)
-    # sphere = stretch.convert_mesh()
+    stretch = dirichlet_parametrization(mesh)
+    sphere = stretch.convert_mesh()
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(111, projection='3d')
     plot_mesh((sphere.get_vertices_collection(), sphere.get_faces_collection(), None, None), ax=ax)
