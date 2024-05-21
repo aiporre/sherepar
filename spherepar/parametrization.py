@@ -11,6 +11,8 @@ def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
     face_reg = mesh.get_most_regular_face()
     # Laplacian matrix dirichlet energy, i.e. cotangent formula for weights
     Ld = mesh.get_laplacian_matrix(weight="cotangent").toarray()
+    for i in range(Ld.shape[0]):
+        print(Ld[i])
     a, b, c = face_reg.u, face_reg.v, face_reg.w
 
     # solution of the Laplace-Beltrami equation
@@ -18,9 +20,9 @@ def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
     alpha = Vector(c, a).dot(Vector(b, a)) / (Vector(b, a).norm() ** 2)
     h_b_img = 1 / Vector(c, Vertex(a.pos + alpha * (b.pos - a.pos), _id=-1)).norm()
     j = np.array(1.j)
-    h_b_zero = np.array([h_b_real, h_b_real, 0]) \
-               + np.array([j * (1 - alpha) * h_b_img, j * alpha * h_b_img, -h_b_img])
-
+    h_b_zero = np.array([-h_b_real, h_b_real, 0]) \
+               + np.array([j * (1 - alpha) * h_b_img, j * alpha * h_b_img, -j * h_b_img])
+    print('hb zero: = > ', h_b_zero)
     # calculating the matrices
     def get_indices_I_from_B(num_vertices, set_B):
         return [i for i in range(num_vertices) if i not in set_B]
