@@ -470,31 +470,31 @@ class MeshSurf(Mesh):
 
                 # a---->v and b----> are the U_vector's
                 # a---->k and b---->k are the V_vector's
-                """
-                           V         k        V
-                a───────────────────► ◄──────────────────b
-                 \ ) α_ij            ▲           β_ij ( /
-                  \                  │                 /
-                   \                 │                /
-                    \                │               /
-                     \               │              /
-                      \              │             /
-                       \             │            /
-                        \            │           /
-                         \           │          /
-                       U  \          │         /U
-                           \         │        /
-                            \        │       /
-                             \       │      /
-                              \      │     /
-                               \     │    /
-                                \    │   /
-                                 \   │  /
-                                  \  │ /
-                                   \ │/
-                                    \/
-                                    v
-                """
+                # """
+                #            V         k        V
+                # a───────────────────► ◄──────────────────b
+                #  \ ) α_ij            ▲           β_ij ( /
+                #   \                  │                 /
+                #    \                 │                /
+                #     \                │               /
+                #      \               │              /
+                #       \              │             /
+                #        \             │            /
+                #         \            │           /
+                #          \           │          /
+                #        U  \          │         /U
+                #            \         │        /
+                #             \        │       /
+                #              \       │      /
+                #               \      │     /
+                #                \     │    /
+                #                 \    │   /
+                #                  \   │  /
+                #                   \  │ /
+                #                    \ │/
+                #                     \/
+                #                     v
+                # """
                 # alpha_ij
                 u_vec = Vector(a, v)
                 v_vec = Vector(a, k)
@@ -612,15 +612,33 @@ class StretchFunction:
             raise ValueError(f" Cell instance {type(cell)} is not implemented in the StretchFunction .")
 
     def stretch_factor(self, face: Face) -> float:
-        """
+        '''
         Computes the stretch factor of a face, as the given in the following equation:
             $$\sigma_{f^{-1}(\tau)} = \frac{\tau}{f(\tau)}$$
         It is a measurment of the local stretch of the face, by the map $f$.
         :param face:
         :return:
-        """
+        '''
         face_s = self.__call__(face)
         return face.area() / face_s.area()
+
+    def __str__(self) -> str:
+        return f"StretchFunction(mesh={self.mesh}, harmonic_map={self.h})"
+
+    def __repr__(self) -> str:
+        return f"StretchFunction(mesh={self.mesh}, harmonic_map={self.h})"
+
+    def convert_mesh(self) -> Mesh:
+        vertices = self.mesh.vertices
+        # print('old vertices: ', vertices)
+        for id, v in self.mesh.vertices.items():
+            print('id...?.', id)
+            print('vertex: ', v)
+            print('new vertex: ', self.__call__(v))
+            vertices[id] = self.__call__(v)
+        # print('new vertices: ', vertices)
+        return Mesh(vertices, self.mesh.edges, self.mesh.faces)
+
 
 
 class MeshFactory:
