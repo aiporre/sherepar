@@ -1,0 +1,6 @@
+numpy
+matplotlib
+trimesh
+pyglet
+nibabel
+meshio
