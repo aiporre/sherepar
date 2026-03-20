@@ -7,7 +7,10 @@ import tempfile
 import numpy as np
 import nibabel as nb
 import meshio
-import pygalmesh
+try:
+    import pygalmesh
+except ImportError:
+    pygalmesh = None
 from skimage import measure
 from skimage import segmentation
 from nibabel.testing import data_path
@@ -356,7 +359,7 @@ class Mesh:
 
 class MeshVolume(Mesh):
     def __init__(self, *args, **kwargs):
-        if "meshio_obj":
+        if "meshio_obj" in kwargs:
             meshio_obj = kwargs['meshio_obj']
             _vertices = OrderedDict()
             for _id, v in enumerate(meshio_obj.points):
@@ -390,14 +393,14 @@ class MeshVolume(Mesh):
                             _edges[e_obj.id] = e_obj
 
         self.tetrahedra = _tetrahedra
-        super(MeshVolume, self).__init__(_vertices, _edges, faces)
+        super(MeshVolume, self).__init__(_vertices, _edges, _faces)
 
-    def get_tetrahedra_collection(self, use_id: bool = True) -> np.ndarray | list[Edge]:
+    def get_tetrahedra_collection(self, use_id: bool = True) -> np.ndarray | list[Tetrahedron]:
         if use_id:
-            values = np.zeros((len(self.vertices), 4))
+            values = np.zeros((len(self.tetrahedra), 4))
         else:
             values = []
-        for i, t in enumerate(self.tetrahedra):
+        for i, t in enumerate(self.tetrahedra.values()):
             if use_id:
                 values[i] = np.array(t.id)
             else:
@@ -556,21 +559,21 @@ class MeshSurf(Mesh):
                 # a---->v and b----> are the U_vector's in the stretched triangle face
                 # a---->k and b---->k are the V_vector's in the stretched triangle face
                 # alpha_ij(f)
-                u_vec = Vector(a_s, v)
-                v_vec = Vector(a_s, k)
+                u_vec = Vector(a_s, v_s)
+                v_vec = Vector(a_s, k_s)
                 cotangent_alpha = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
                 stretch_factor_alpha = stretch_function.stretch_factor(face_a)
                 # beta_ij(f)
-                u_vec = Vector(b_s, v)
-                v_vec = Vector(b_s, k)
+                u_vec = Vector(b_s, v_s)
+                v_vec = Vector(b_s, k_s)
                 cotangent_beta = u_vec.dot(v_vec) / u_vec.cross(v_vec).norm()
                 stretch_factor_beta = stretch_function.stretch_factor(face_b)
-                values_col.append((cotangent_alpha / stretch_factor_alpha + cotangent_beta / stretch_factor_beta) / 2)
+                values_col.append(-(cotangent_alpha / stretch_factor_alpha + cotangent_beta / stretch_factor_beta) / 2)
                 index_col.append(v.id)
                 index_row.append(k.id)
             ### once completed the computation of w_ij for all j in neighbors to i we sum to compute the diagonal of L
             values.extend(values_col)
-            values.append(sum(values_col))
+            values.append(-1*sum(values_col))
             index_col.append(v.id)
             index_row.append(v.id)
         N = max((max(index_row), max(index_col))) + 1
@@ -628,7 +631,7 @@ class StretchFunction:
             raise ValueError(f" Cell instance {type(cell)} is not implemented in the StretchFunction .")
 
     def stretch_factor(self, face: Face) -> float:
-        '''
+        r'''
         Computes the stretch factor of a face, as the given in the following equation:
             $$\sigma_{f^{-1}(\tau)} = \frac{\tau}{f(\tau)}$$
         It is a measurment of the local stretch of the face, by the map $f$.
@@ -645,14 +648,9 @@ class StretchFunction:
         return f"StretchFunction(mesh={self.mesh}, harmonic_map={self.h})"
 
     def convert_mesh(self) -> Mesh:
-        vertices = self.mesh.vertices
-        # print('old vertices: ', vertices)
+        vertices = {}
         for id, v in self.mesh.vertices.items():
-            print('id...?.', id)
-            print('vertex: ', v)
-            print('new vertex: ', self.__call__(v))
             vertices[id] = self.__call__(v)
-        # print('new vertices: ', vertices)
         return Mesh(vertices, self.mesh.edges, self.mesh.faces)
 
 
