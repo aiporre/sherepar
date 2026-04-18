@@ -331,7 +331,8 @@ def plot_mesh(mesh, ax=None):
 def main():
     # Load the mesh from the .ply file
     # mesh = trimesh.load_mesh("data/suzanne.obj")
-    mesh = trimesh.load_mesh("/home/sauron/Documents/Phd/code/sherepar/data/tr_reg_000.ply")
+    # mesh = trimesh.load_mesh("/home/sauron/Documents/Phd/code/sherepar/data/tr_reg_000.ply")
+    mesh = trimesh.load_mesh("/home/sauron/Documents/Phd/code/sherepar/data/ellipsoid.obj")
 
     # Create a new figure for the plot
     fig = plt.figure()
