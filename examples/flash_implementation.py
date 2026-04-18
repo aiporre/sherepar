@@ -1,48 +1,70 @@
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from trimesh import Trimesh
 import numpy as np
-from scipy.sparse import find, coo_matrix
+from scipy.sparse import find, coo_matrix, lil_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve
 from scipy.linalg import norm
-from numpy.linalg import solve
 from numpy import cross
-
-from scipy.sparse import coo_matrix
 
 import trimesh
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+# Numerical guard constants
+_EPS_AREA  = 1e-14  # minimum triangle area: prevents division-by-zero in cotangent
+                    # and Beltrami coefficient when triangles are nearly degenerate
+_EPS_DENOM = 1e-14  # minimum |denominator| in Beltrami mu: guards against a
+                    # collapsed/constant map where E+G+2√(EG-F²) → 0
+_EPS_PROJ  = 1e-12  # minimum south-pole stereographic denominator (1+S[:,2]):
+                    # larger than _EPS_AREA because S[:,2] ∈ [-1,1] and even a
+                    # numerically-exact south-pole vertex gives 1+S[:,2] = O(ε_mach²)
+
 
 def beltrami_coefficient(v, f, map):
     nf = len(f)
-    Mi = np.tile(np.arange(nf), 3)
-    Mj = f.flatten('F')
+    nv = map.shape[0]
+
+    # BUG 1 FIX: Mi must repeat each face index 3 times (face-grouped) and Mj
+    # must list vertices in row-major (C) order so that Mi[k] and Mj[k] index
+    # the same face.  The old code used np.tile (column-grouped Mi) with
+    # f.flatten('F') (column-grouped Mj) but Mx/My are face-grouped, so every
+    # triplet after k=0 was mismatched.
+    Mi = np.repeat(np.arange(nf), 3)   # [0,0,0, 1,1,1, ..., nf-1,nf-1,nf-1]
+    Mj = f.flatten('C')                 # [f[0,0],f[0,1],f[0,2], f[1,0],...]
 
     e1 = v[f[:, 2], :2] - v[f[:, 1], :2]
     e2 = v[f[:, 0], :2] - v[f[:, 2], :2]
     e3 = v[f[:, 1], :2] - v[f[:, 0], :2]
 
     area = (-e2[:, 0] * e1[:, 1] + e1[:, 0] * e2[:, 1]) / 2
-    area = np.repeat(area, 3)
+    # Guard against degenerate (zero-area) triangles before dividing.
+    area_safe = np.where(np.abs(area) < _EPS_AREA, _EPS_AREA, area)
+    area_rep = np.repeat(area_safe, 3)  # face-grouped: [a0,a0,a0, a1,a1,a1, ...]
 
-    Mx = np.ravel([e1[:, 1], e2[:, 1], e3[:, 1]], order='F') / area / 2
-    My = -np.ravel([e1[:, 0], e2[:, 0], e3[:, 0]], order='F') / area / 2
+    Mx = np.ravel([e1[:, 1], e2[:, 1], e3[:, 1]], order='F') / area_rep / 2
+    My = -np.ravel([e1[:, 0], e2[:, 0], e3[:, 0]], order='F') / area_rep / 2
 
-    Dx = coo_matrix((Mx, (Mi, Mj)))
-    Dy = coo_matrix((My, (Mi, Mj)))
+    # Explicit shape (nf, nv) avoids undersized matrix when nv > max(Mj)+1.
+    Dx = coo_matrix((Mx, (Mi, Mj)), shape=(nf, nv))
+    Dy = coo_matrix((My, (Mi, Mj)), shape=(nf, nv))
 
-    dXdu = Dx.dot(map[:, 0])
-    dXdv = Dy.dot(map[:, 0])
-    dYdu = Dx.dot(map[:, 1])
-    dYdv = Dy.dot(map[:, 1])
-    dZdu = Dx.dot(map[:, 2])
-    dZdv = Dy.dot(map[:, 2])
+    dXdu = Dx.dot(map[:, 0]); dXdv = Dy.dot(map[:, 0])
+    dYdu = Dx.dot(map[:, 1]); dYdv = Dy.dot(map[:, 1])
+    dZdu = Dx.dot(map[:, 2]); dZdv = Dy.dot(map[:, 2])
 
     E = dXdu ** 2 + dYdu ** 2 + dZdu ** 2
     G = dXdv ** 2 + dYdv ** 2 + dZdv ** 2
     F = dXdu * dXdv + dYdu * dYdv + dZdu * dZdv
-    mu = (E - G + 2j * F) / (E + G + 2 * np.sqrt(E * G - F ** 2))
+
+    # Stability: EG - F² >= 0 by Cauchy-Schwarz but floating-point can give a
+    # tiny negative value.  Clamp before sqrt to avoid NaN.
+    EGF2 = np.maximum(E * G - F ** 2, 0.0)
+    denom = E + G + 2.0 * np.sqrt(EGF2)
+    # Guard denominator against zero (degenerate / collapsed mapping).
+    # The denominator E+G+2√(EG-F²) is always ≥ 0 for real E,G,F, so
+    # preserving a positive floor (rather than a signed one) is correct here.
+    denom = np.where(denom < _EPS_DENOM, _EPS_DENOM, denom)
+    mu = (E - G + 2j * F) / denom
 
     return mu
 
@@ -57,7 +79,11 @@ def cotangent_laplacian(v, f):
     l3 = np.sqrt(np.sum((v[f1, :] - v[f2, :]) ** 2, axis=1))
 
     s = (l1 + l2 + l3) * 0.5
-    area = np.sqrt(s * (s - l1) * (s - l2) * (s - l3))
+    # Stability: clamp Heron's product before sqrt to avoid NaN from tiny
+    # negative values caused by floating-point rounding on near-degenerate
+    # triangles.
+    area = np.sqrt(np.maximum(s * (s - l1) * (s - l2) * (s - l3), 0.0))
+    area = np.where(area < _EPS_AREA, _EPS_AREA, area)
 
     cot12 = (l1 ** 2 + l2 ** 2 - l3 ** 2) / (area * 2)
     cot23 = (l2 ** 2 + l3 ** 2 - l1 ** 2) / (area * 2)
@@ -87,6 +113,9 @@ def find_triangle(f, v):
 
 
 def linear_beltrami_solver(v, f, mu, landmark, target):
+    nv = len(v)
+    landmark = np.asarray(landmark)
+
     af = (1 - 2 * np.real(mu) + np.abs(mu) ** 2) / (1.0 - np.abs(mu) ** 2)
     bf = -2 * np.imag(mu) / (1.0 - np.abs(mu) ** 2)
     gf = (1 + 2 * np.real(mu) + np.abs(mu) ** 2) / (1.0 - np.abs(mu) ** 2)
@@ -103,7 +132,9 @@ def linear_beltrami_solver(v, f, mu, landmark, target):
     l = np.sqrt(np.column_stack([uxv0 ** 2 + uyv0 ** 2, uxv1 ** 2 + uyv1 ** 2, uxv2 ** 2 + uyv2 ** 2]))
     s = np.sum(l, axis=1) * 0.5
 
-    area = np.sqrt(s * (s - l[:, 0]) * (s - l[:, 1]) * (s - l[:, 2]))
+    # Stability: clamp Heron's product before sqrt (same as cotangent_laplacian).
+    area = np.sqrt(np.maximum(s * (s - l[:, 0]) * (s - l[:, 1]) * (s - l[:, 2]), 0.0))
+    area = np.where(area < _EPS_AREA, _EPS_AREA, area)
 
     v00 = (af * uxv0 * uxv0 + 2 * bf * uxv0 * uyv0 + gf * uyv0 * uyv0) / area
     v11 = (af * uxv1 * uxv1 + 2 * bf * uxv1 * uyv1 + gf * uyv1 * uyv1) / area
@@ -115,16 +146,24 @@ def linear_beltrami_solver(v, f, mu, landmark, target):
     I = np.concatenate([f0, f1, f2, f0, f1, f1, f2, f2, f0])
     J = np.concatenate([f0, f1, f2, f1, f0, f2, f1, f0, f2])
     V = np.concatenate([v00, v11, v22, v01, v01, v12, v12, v20, v20]) / 2
-    A = coo_matrix((-V, (I, J))).toarray()
+
+    # BUG 3 FIX: keep A sparse throughout.  Converting to a dense array
+    # (a) costs O(nv²) memory, (b) makes spsolve fail because it requires a
+    # sparse matrix as its first argument.  Use lil_matrix for efficient
+    # row/column zeroing, then convert to csr only for the solve.
+    A = coo_matrix((-V, (I, J)), shape=(nv, nv)).tolil()
 
     targetc = target[:, 0] + 1j * target[:, 1]
-    b = -A[:, landmark].dot(targetc)
+    # Compute rhs BEFORE zeroing the landmark columns (matching MATLAB order).
+    b = -(A.tocsr()[:, landmark] @ targetc)
     b[landmark] = targetc
+
     A[landmark, :] = 0
     A[:, landmark] = 0
-    A = A + coo_matrix((np.ones(len(landmark)), (landmark, landmark)), shape=A.shape)
-    map = spsolve(A, b)
-    map = np.column_stack([np.real(map), np.imag(map)])
+    A[landmark, landmark] = 1.0   # enforce boundary condition: map[landmark] = target[landmark]
+
+    map_c = spsolve(csr_matrix(A), b)
+    map = np.column_stack([np.real(map_c), np.imag(map_c)])
 
     return map
 
@@ -149,12 +188,17 @@ def flash_map(mesh: Trimesh):
     p1, p2, p3 = f[bigtri, :]
 
     fixed = [p1, p2, p3]
-    mrow, mcol, mval = find(M.toarray()[fixed, :])
-    print('mrow;', mrow)
-    print('mcol', mcol)
-    print('mval', mval)
-    M = M - coo_matrix((mval, (mrow, mcol)), shape=(nv, nv)) + coo_matrix((np.ones(len(fixed)), (fixed, fixed)),
-                                                                          shape=(nv, nv))
+    # BUG 2 FIX: find() on a submatrix returns LOCAL row indices (0,1,2).
+    # The old code used those local indices directly as global vertex indices,
+    # corrupting rows 0/1/2 instead of rows p1/p2/p3.
+    # Fix: slice the CSR matrix (no full dense materialisation) and map
+    # local sub-row indices back to global vertex indices via fixed[sub_rows].
+    M_sub = M.tocsr()[fixed, :]
+    sub_rows, sub_cols, mval = find(M_sub)
+    global_rows = np.array(fixed)[sub_rows]   # local {0,1,2} -> global {p1,p2,p3}
+    M = (M
+         - coo_matrix((mval, (global_rows, sub_cols)), shape=(nv, nv))
+         + coo_matrix((np.ones(len(fixed)), (fixed, fixed)), shape=(nv, nv)))
 
     # set the boundary condition for big triangle
     x1, y1, x2, y2 = 0, 0, 1, 0  # arbitrarily set the two points
@@ -220,7 +264,10 @@ def flash_map(mesh: Trimesh):
     fixed = I[:min(len(v), fixnum)]
 
     # south pole stereographic projection
-    P = np.column_stack([S[:, 0] / (1 + S[:, 2]), S[:, 1] / (1 + S[:, 2])])
+    # Stability: clamp 1+S[:,2] away from zero to avoid division by zero when a
+    # vertex sits at (or very close to) the south pole (S[:,2] = -1).
+    sp_denom = np.maximum(1.0 + S[:, 2], _EPS_PROJ)
+    P = np.column_stack([S[:, 0] / sp_denom, S[:, 1] / sp_denom])
 
     # compute the Beltrami coefficient
     mu = beltrami_coefficient(P, f, v)
