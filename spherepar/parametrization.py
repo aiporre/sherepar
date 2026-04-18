@@ -14,6 +14,7 @@ Implements Algorithm 4.1 (initial spherical conformal map) and Algorithm 4.2
 #   [A4.1-4] Reduced system: A_coeff.shape == (|I|, |I|), rhs.shape == (|I|,)
 #   [A4.1-5] No NaN/Inf in h after solve
 #   [A4.1-6] All sphere points ||f_i|| ~= 1  (atol < 1e-10)
+#   [A4.1-7] h centered (mean ~= 0) and north/south poles balanced
 #
 # After each Algorithm 4.2 (stretch_parametrization) iteration:
 #   [A4.2-1] |I| + |B| == N
@@ -39,11 +40,23 @@ Implements Algorithm 4.1 (initial spherical conformal map) and Algorithm 4.2
 # 4.1 scope         | Steps 1-7, no loop           | Contained a CEM loop at end
 #                   |                              |   Fix: loop removed
 # ------------------|------------------------------|----------------------------
+# 4.1 Step 8        | (new) center h; rescale for  | Not done at all
+#                   | balanced pole coverage       |   Fix: centering + FLASH-style
+#                   | (FLASH north/south rescale)  |         rescaling added
+# ------------------|------------------------------|----------------------------
+# 4.2 Step 3b       | r = 1  (unit-circle boundary | r = median(|h|)  (drifts
+#                   | of Möbius inversion)         |   arbitrarily away from 1)
+#                   |                              |   Fix: r = 1.0
+# ------------------|------------------------------|----------------------------
 # 4.2 Step 3c       | [L_D]_{I,I} h_I = ...       | Used Ls (stretch Laplacian)
 #                   |                              |   Fix: use Ld (cotangent)
 # ------------------|------------------------------|----------------------------
 # 4.2 Step 3e       | delta = E_D(g) - E_D(f)     | Not computed at all
 #                   |                              |   Fix: added _dirichlet_energy
+# ------------------|------------------------------|----------------------------
+# 4.2 Step 3f       | stop only when 0<=delta<=eps | stop when delta <= eps
+#                   | (small positive improvement) |   (also stops on divergence)
+#                   |                              |   Fix: 0 <= delta <= eps
 # ------------------|------------------------------|----------------------------
 # 4.2 Step 3a       | h_i <- h_i / |h_i|^2        | No guard for |h_i|=0
 #                   |                              |   Fix: clamp |h|^2 >= _EPS_INV
@@ -274,6 +287,60 @@ def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
         f"min={sphere_norms.min():.8f}, max={sphere_norms.max():.8f}"
     )
 
+    # ----- Step 8: center and rescale for balanced pole coverage -------------
+    #
+    # Without centering the stereographic image can sit far off-origin so that
+    # nearly all vertices land on one hemisphere after Pi^{-1}, giving a very
+    # uneven initial map that the CEM loop has to correct.
+    #
+    # After centering we rescale so that the average edge-length of the
+    # boundary ("north") face in the complex plane equals the geometric mean
+    # of the north and south face edge-lengths.  This mirrors the FLASH
+    # north/south balancing step and dramatically improves the starting point.
+    #
+    h = h - np.mean(h)
+
+    # Average edge length of the boundary face (north face) in the h-plane.
+    # B always has exactly 3 elements (set at Step 2 from the 3 boundary vertices).
+    h_a, h_b, h_c = h[B[0]], h[B[1]], h[B[2]]
+    NorthTriSide  = (abs(h_a - h_b) + abs(h_b - h_c) + abs(h_c - h_a)) / 3.0
+
+    if NorthTriSide > 0:
+        # South-pole stereographic projection: w = (g1 + i*g2) / (1 + g3)
+        # Points near the south pole map to small |w|, so the innermost
+        # triangle in the w-plane is the antipode of the north face.
+        sphere_pts_h = _inverse_stereo_projection(h)          # (N, 3)
+        denom_s = np.maximum(1.0 + sphere_pts_h[:, 2], _EPS_PROJ)
+        w = (sphere_pts_h[:, 0] + 1j * sphere_pts_h[:, 1]) / denom_s
+
+        # Find the face with the smallest total |h| (i.e., the face whose
+        # stereographic pre-image is closest to the south pole).
+        faces_arr = mesh.get_faces_collection()   # (F, 3) int array
+        abs_h_sum = (np.abs(h[faces_arr[:, 0]])
+                     + np.abs(h[faces_arr[:, 1]])
+                     + np.abs(h[faces_arr[:, 2]]))
+        order  = np.argsort(abs_h_sum)
+        B_set  = set(B)
+        inner_face = None
+        for idx in order:
+            candidate = faces_arr[idx]
+            # Skip the boundary face itself (all 3 vertices are in B)
+            if set(candidate) != B_set:
+                inner_face = candidate
+                break
+
+        if inner_face is not None:
+            w0, w1, w2 = w[inner_face[0]], w[inner_face[1]], w[inner_face[2]]
+            SouthTriSide = (abs(w0 - w1) + abs(w1 - w2) + abs(w2 - w0)) / 3.0
+            if SouthTriSide > 0:
+                h = h * np.sqrt(NorthTriSide * SouthTriSide) / NorthTriSide
+
+    # [A4.1-7] diagnostics
+    sphere_pts_final = _inverse_stereo_projection(h)
+    z3 = sphere_pts_final[:, 2]
+    print(f"[A4.1] After rescaling: g3 in [{z3.min():.4f}, {z3.max():.4f}] "
+          f"(balanced hemispheres → close to [-1, 1])")
+
     return StretchFunction(mesh, h)
 
 
@@ -327,17 +394,19 @@ def stretch_parametrization(mesh: MeshSurf,
         abs_h_sq = np.where(abs_h_sq < _EPS_INV, _EPS_INV, abs_h_sq)  # guard
         h = h / abs_h_sq
 
-        # Step 3b: I = {i : |h_i| < r},  B = complement
-        # Adaptive radius r = median(|h|) separates interior from boundary
-        # robustly for any mesh shape.
+        # Step 3b: I = {i : |h_i| < 1},  B = complement
+        # The Möbius inversion h -> h/|h|^2 maps the open unit disk to its
+        # exterior and vice versa.  Therefore the natural partition boundary is
+        # the unit circle (r = 1), not the empirical median, which drifts
+        # arbitrarily and produces an inconsistent Dirichlet sub-problem.
         abs_h = np.abs(h)
-        r     = float(np.median(abs_h))
+        r     = 1.0
         I     = np.where(abs_h <  r)[0].tolist()
         B     = np.where(abs_h >= r)[0].tolist()
 
         if verbose:
             print(f"[A4.2] iter {count}: |I|={len(I)}, |B|={len(B)}, "
-                  f"r={r:.4f}, |h| in [{abs_h.min():.4e}, {abs_h.max():.4e}]")
+                  f"r=1.0, |h| in [{abs_h.min():.4e}, {abs_h.max():.4e}]")
 
         # [A4.2-1] partition sanity
         assert len(I) + len(B) == N, (
@@ -380,10 +449,12 @@ def stretch_parametrization(mesh: MeshSurf,
             print(f"[A4.2] iter {count}: "
                   f"E_D(g)={E_g:.6e}, E_D(f)={E_f:.6e}, delta={delta:.6e}")
 
-        # Step 3f: g <- f
+        # Step 3f: g <- f; stop only on small *positive* improvement
+        # Stopping when delta < 0 (energy increased) would exit on divergence.
+        # We only converge when the improvement 0 <= delta <= eps.
         E_g = E_f
 
-        if delta <= eps:
+        if 0 <= delta <= eps:
             if verbose:
                 print(f"[A4.2] Converged at iteration {count}: "
                       f"delta={delta:.3e} <= eps={eps:.3e}")
