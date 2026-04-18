@@ -68,6 +68,7 @@ def plot_mesh(mesh, ax=None):
     ax.set_xlabel("x-axis: a = 6 per ellipsoid")
     ax.set_ylabel("y-axis: b = 10")
     ax.set_zlabel("z-axis: c = 16")
+    ax.set_aspect("equal")
     xx = verts[:, 0]
     yy = verts[:, 1]
     zz = verts[:, 2]
