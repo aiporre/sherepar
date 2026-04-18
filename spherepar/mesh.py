@@ -420,15 +420,24 @@ class MeshSurf(Mesh):
         _vertices = OrderedDict()
         for _id, v in enumerate(vertices):
             _vertices[_id] = Vertex(v, _id)
-        # extract faces
+        # extract faces: we sort before, not I will just preserve the winding order,
+        # I need a cannonical sorted key for duplicate but sort will destroy the consitent order for compute surface
+        # normals.
+
         _faces = {}
+        _seen_faces: set[tuple] = set() # this the signature
         for f in faces:
-            f.sort()
+            # f.sort()
+            dedup_key = tuple(sorted(f))
+            if dedup_key in _seen_faces:
+                print('Face already in the list', dedup_key, 'skipping...')
+                continue
+            _seen_faces.add(dedup_key)
             u, v, w = _vertices[f[0]], _vertices[f[1]], _vertices[f[2]]
             f_obj = Face(u, v, w)
-            if f_obj.id in _faces:
-                print('Face already in the list', f_obj.id, 'skipping...')
-                continue
+            # if f_obj.id in _faces:
+            #     print('Face already in the list', f_obj.id, 'skipping...')
+            #     continue
             _faces[f_obj.id] = f_obj
 
         # extrac edges from the faces
