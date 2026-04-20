@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.spatial import SphericalVoronoi, geometric_slerp
 from scipy.spatial import Delaunay
+import trimesh
 
 
 def generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=100):
@@ -69,21 +70,26 @@ def save_to_obj(filename, vertices, faces):
     vertices: Array of vertex coordinates (N x 3)
     faces: Array of face indices (M x 3)
     """
-    with open(filename, 'w') as f:
-        # Write header
-        f.write("# Ellipsoid Mesh (Watertight)\n")
-        f.write(f"# Vertices: {len(vertices)}\n")
-        f.write(f"# Faces: {len(faces)}\n\n")
+    # save with trimehs
 
-        # Write vertices
-        for vertex in vertices:
-            f.write(f"v {vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
-
-        f.write("\n")
-
-        # Write faces (OBJ indices are 1-based, not 0-based)
-        for face in faces:
-            f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
+    mesh_obj = trimesh.Trimesh(vertices, faces)
+    mesh_obj.fix_normals()
+    mesh_obj.export(filename)
+    # with open(filename, 'w') as f:
+    #     # Write header
+    #     f.write("# Ellipsoid Mesh (Watertight)\n")
+    #     f.write(f"# Vertices: {len(vertices)}\n")
+    #     f.write(f"# Faces: {len(faces)}\n\n")
+    #
+    #     # Write vertices
+    #     for vertex in vertices:
+    #         f.write(f"v {vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
+    #
+    #     f.write("\n")
+    #
+    #     # Write faces (OBJ indices are 1-based, not 0-based)
+    #     for face in faces:
+    #         f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
 
     print(f"✓ Saved to {filename}")
     print(f"  Vertices: {len(vertices)}")
