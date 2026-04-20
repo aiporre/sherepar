@@ -55,7 +55,7 @@ except ImportError:
     _GRAPHOP_AVAILABLE = False
 
 
-#  Surface ─
+# ── Surface ───────────────────────────────────────────────────────────────────
 
 class Surface:
     """A single generated surface example.
@@ -104,7 +104,7 @@ class Surface:
         self.signal_meta: Optional[Dict[str, Any]] = (
             dict(signal_meta) if signal_meta is not None else None)
 
-    #  Mutation helpers 
+    # ── Mutation helpers ──────────────────────────────────────────────────────
 
     def update_signal(
             self,
@@ -150,7 +150,7 @@ class Surface:
         new.fname = f"{prefix}{self.fname}{suffix}"
         return new
 
-    #  Persistence ─
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(self) -> Dict[str, str]:
         """Save geometry, signal, and metadata to disk.
@@ -180,16 +180,16 @@ class Surface:
         surface_path = surfaces_dir / f"{self.fname}.obj"
         labels_path = labels_dir / f"{self.fname}.json"
 
-        #  Write OBJ 
+        # ── Write OBJ ──────────────────────────────────────────────────────
         self._write_obj(surface_path)
 
-        #  Write signal ─
+        # ── Write signal ───────────────────────────────────────────────────
         signal_path: Optional[Path] = None
         if self.signal is not None:
             signal_path = signals_dir / f"{self.fname}.npy"
             np.save(signal_path, self.signal)
 
-        #  Write metadata JSON 
+        # ── Write metadata JSON ────────────────────────────────────────────
         metadata = {
             "fname": self.fname,
             "surface_file": str(surface_path),
@@ -210,7 +210,7 @@ class Surface:
             result["signal"] = str(signal_path)
         return result
 
-    #  Private helpers ─
+    # ── Private helpers ───────────────────────────────────────────────────────
 
     def _write_obj(self, path: Path) -> None:
         """Write geometry to a minimal OBJ file."""
@@ -251,7 +251,7 @@ class Surface:
         )
 
 
-#  SurfaceFactory 
+# ── SurfaceFactory ────────────────────────────────────────────────────────────
 
 class SurfaceFactory:
     """Factory for generating deformed surfaces with attached synthetic signals.
@@ -286,7 +286,7 @@ class SurfaceFactory:
         self.template_mesh_path: str = str(template_mesh_path)
         self._counter: int = 0  # auto-incremented when no fname given
 
-    #  Surface generation 
+    # ── Surface generation ────────────────────────────────────────────────────
 
     def generate_surface(
             self,
@@ -333,18 +333,13 @@ class SurfaceFactory:
         -------
         Surface
         """
-        #  Deformation ─
+        # ── Deformation ───────────────────────────────────────────────────
         target_positions = np.asarray(target_positions, dtype=np.float64)
         if target_positions.ndim == 2:
             target_positions = target_positions.ravel()
-        # roi_ids =  [0,1,2,3,4,5,6,7,8,9,10,11]
-        # roi_ids = [i for i in range(1, 400)]
+
         roi = roi_ids if roi_ids is not None else []
-        # if len(roi) == 0:
-        #     # create list of id all
-        #     roi = [i+1 for i in range(250)]
-        print(">>>>  HANDLE LIST:  ", handle_ids)
-        print(">>>> ROI IDS:   ", roi_ids)
+
         V_new, F, deform_meta = _graphop.deform_surface(
             mesh_path=self.template_mesh_path,
             handle_ids=list(handle_ids),
@@ -355,12 +350,12 @@ class SurfaceFactory:
             max_iter=max_iter,
         )
 
-        #  File name ─
+        # ── File name ─────────────────────────────────────────────────────
         if fname is None:
             fname = f"surface_{self._counter:05d}"
             self._counter += 1
 
-        #  Optional signal ─
+        # ── Optional signal ───────────────────────────────────────────────
         signal: Optional[np.ndarray] = None
         signal_meta: Optional[Dict[str, Any]] = None
 
@@ -379,7 +374,96 @@ class SurfaceFactory:
             signal_meta=signal_meta,
         )
 
-    #  Signal helpers 
+    def generate_surface_with_angles(
+            self,
+            handle_transforms: List[Dict[str, Any]],
+            roi_ids: Optional[List[int]] = None,
+            method: str = "sre_arap",
+            alpha: float = 0.02,
+            max_iter: int = 50,
+            signal_type: Optional[str] = None,
+            signal_params: Optional[Dict[str, Any]] = None,
+            fname: Optional[str] = None,
+    ) -> "Surface":
+        """Generate a deformed surface using per-handle rotation specifications.
+
+        Each handle is a dict with three required keys:
+
+        * ``vertex_id`` (int)   — 0-based index of the center vertex.
+        * ``angle``     (float) — rotation in radians around the surface normal
+          at the center vertex.
+        * ``ring_size`` (float) — Euclidean radius; all vertices within this
+          distance of the center vertex become positional handles whose target
+          positions are computed by rotating them by *angle* around the surface
+          normal at *vertex_id*.
+
+        Parameters
+        ----------
+        handle_transforms:
+            List of per-handle dicts, each with keys ``vertex_id``, ``angle``,
+            and ``ring_size``.
+        roi_ids:
+            Optional region-of-interest vertex indices.  ``None`` = whole mesh.
+        method:
+            Deformation algorithm: ``'sre_arap'`` (default), ``'original_arap'``,
+            or ``'spokes_and_rims'``.
+        alpha:
+            SRE-ARAP smoothness weight (default 0.02).
+        max_iter:
+            Maximum ARAP iterations (default 50).
+        signal_type:
+            Optional signal to attach immediately.  ``'isotropic'`` or
+            ``'anisotropic'``.
+        signal_params:
+            Parameters forwarded to the signal generator.
+        fname:
+            Base filename (without extension).  Auto-generated if ``None``.
+
+        Returns
+        -------
+        Surface
+        """
+        # Validate required keys up-front for a clear error message
+        for i, t in enumerate(handle_transforms):
+            for key in ("vertex_id", "angle", "ring_size"):
+                if key not in t:
+                    raise ValueError(
+                        f"handle_transforms[{i}] is missing required key '{key}'"
+                    )
+
+        roi = roi_ids if roi_ids is not None else []
+
+        V_new, F, deform_meta = _graphop.deform_surface_with_angles(
+            mesh_path=self.template_mesh_path,
+            handle_transforms=list(handle_transforms),
+            roi_ids=list(roi),
+            method=method,
+            alpha=alpha,
+            max_iter=max_iter,
+        )
+
+        if fname is None:
+            fname = f"surface_{self._counter:05d}"
+            self._counter += 1
+
+        signal: Optional[np.ndarray] = None
+        signal_meta: Optional[Dict[str, Any]] = None
+        if signal_type is not None:
+            signal, signal_meta = self._compute_signal(
+                signal_type, V_new, signal_params or {}
+            )
+
+        return Surface(
+            vertices=V_new,
+            faces=F,
+            deform_meta=deform_meta,
+            root=self.root,
+            fname=fname,
+            signal=signal,
+            signal_meta=signal_meta,
+        )
+
+    # ── Signal helpers ────────────────────────────────────────────────────────
 
     def compute_signal(
             self,
@@ -491,7 +575,7 @@ class SurfaceFactory:
         )
 
 
-#  Module-level helpers 
+# ── Module-level helpers ──────────────────────────────────────────────────────
 
 def _resolve_center(vertices: np.ndarray,
                     center: Any) -> np.ndarray:

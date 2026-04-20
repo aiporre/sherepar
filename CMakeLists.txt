@@ -39,6 +39,25 @@ target_include_directories(deformation_backend PUBLIC graphop)
 target_link_libraries(deformation_backend PUBLIC CGAL::CGAL Eigen3::Eigen)
 target_compile_definitions(deformation_backend PUBLIC CGAL_EIGEN3_ENABLED)
 
+# ── C++ test battery (no pybind11 dependency) ─────────────────────────────────
+# Build:  make test_graphop
+# Run:    ./test_graphop          (or: ctest --test-dir build -V)
+#
+# TEST_DATA_DIR is injected at compile time so the tests can always locate
+# the sample meshes in data/ regardless of the working directory.
+add_executable(test_graphop
+    graphop/tests/test_deformation.cpp
+)
+target_include_directories(test_graphop PRIVATE graphop graphop/tests)
+target_link_libraries(test_graphop PRIVATE deformation_backend)
+target_compile_definitions(test_graphop PRIVATE
+    CGAL_EIGEN3_ENABLED
+    TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+)
+
+enable_testing()
+add_test(NAME graphop_tests COMMAND test_graphop)
+
 # ── Python extension: graphop module ──────────────────────────────────────────
 pybind11_add_module(graphop graphop/bindings.cpp)
 target_link_libraries(graphop PRIVATE deformation_backend)

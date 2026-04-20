@@ -3,23 +3,25 @@
  *
  * pybind11 bindings for the graphop deformation backend.
  *
- * Exposes deform_surface() to Python as part of the `graphop` extension module.
- * The Python function signature mirrors the design in the problem statement:
+ * Exposes two functions to Python:
  *
- *   V_new, F, meta = graphop.deform_surface(
- *       mesh_path,
- *       handle_ids,
- *       target_positions,
- *       roi_ids=[],
- *       method="sre_arap",
- *       alpha=0.02,
- *       max_iter=50,
- *   )
+ *   deform_surface(mesh_path, handle_ids, target_positions, ...)
+ *       Classic interface: caller supplies raw target positions.
  *
- * Returns:
- *   V_new  – NumPy array [N, 3] float64
- *   F      – NumPy array [M, 3] int32
- *   meta   – Python dict with all deformation metadata
+ *   deform_surface_with_angles(mesh_path, handle_transforms, ...)
+ *       Rotation interface: each handle specifies a center vertex, an angle,
+ *       and a ring_size.  Target positions are computed automatically.
+ *
+ *       handle_transforms is a list of dicts, each with keys:
+ *           vertex_id  (int)    — 0-based center vertex index
+ *           angle      (float)  — rotation angle in radians
+ *           ring_size  (float)  — radius; all vertices within this distance
+ *                                 of the center vertex become handles
+ *
+ * Both functions return (V_new, F, meta) where:
+ *   V_new — NumPy array [N, 3] float64
+ *   F     — NumPy array [M, 3] int32
+ *   meta  — Python dict with all deformation metadata
  */
 
 #include "deformation.h"
@@ -31,7 +33,7 @@
 namespace py = pybind11;
 using namespace graphop;
 
-// utils 
+// ── Shared helpers ────────────────────────────────────────────────────────────
 
 static DeformMethod parse_method(const std::string& name)
 {
@@ -43,22 +45,46 @@ static DeformMethod parse_method(const std::string& name)
         "'sre_arap', 'original_arap', 'spokes_and_rims'.");
 }
 
+/** Convert (verts_flat, faces_flat, meta) → Python (V_new, F, meta_dict). */
+static py::tuple pack_result(
+    const std::vector<double>& verts_flat,
+    const std::vector<int>&    faces_flat,
+    const DeformMeta&          meta)
+{
+    int nv = (int)verts_flat.size() / 3;
+    py::array_t<double> V_new({nv, 3});
+    std::copy(verts_flat.begin(), verts_flat.end(), V_new.mutable_data());
 
-// --------
-//  Python-facing wrapper 
-// --------
+    int nf = (int)faces_flat.size() / 3;
+    py::array_t<int> F({nf, 3});
+    std::copy(faces_flat.begin(), faces_flat.end(), F.mutable_data());
 
+    py::dict d;
+    d["template_mesh_path"]     = meta.template_mesh_path;
+    d["method"]                 = meta.method;
+    d["handle_ids"]             = meta.handle_ids;
+    d["target_positions"]       = meta.target_positions;
+    d["roi_ids"]                = meta.roi_ids;
+    d["alpha"]                  = meta.alpha;
+    d["max_iter"]               = meta.max_iter;
+    d["transform_center_ids"]   = meta.transform_center_ids;
+    d["transform_angles"]       = meta.transform_angles;
+    d["transform_ring_sizes"]   = meta.transform_ring_sizes;
+
+    return py::make_tuple(V_new, F, d);
+}
+
+// ── deform_surface ────────────────────────────────────────────────────────────
 
 static py::tuple py_deform_surface(
-    const std::string& mesh_path,
-    const std::vector<int>& handle_ids,
-    py::array_t<double> target_positions_arr,
-    const std::vector<int>& roi_ids,
-    const std::string& method_str,
+    const std::string&       mesh_path,
+    const std::vector<int>&  handle_ids,
+    py::array_t<double>      target_positions_arr,
+    const std::vector<int>&  roi_ids,
+    const std::string&       method_str,
     double alpha,
-    int max_iter)
+    int    max_iter)
 {
-    // Flatten target_positions from (H,3) or (3H,) to std::vector<double>
     auto buf = target_positions_arr.request();
     if (buf.ndim == 2) {
         if (buf.shape[0] != (ssize_t)handle_ids.size() || buf.shape[1] != 3)
@@ -75,35 +101,44 @@ static py::tuple py_deform_surface(
     const double* data = static_cast<const double*>(buf.ptr);
     std::vector<double> tgt(data, data + handle_ids.size() * 3);
 
-    DeformMethod method = parse_method(method_str);
+    auto [vf, ff, meta] = deform_surface(
+        mesh_path, handle_ids, tgt, roi_ids, parse_method(method_str), alpha, max_iter);
+    return pack_result(vf, ff, meta);
+}
 
-    // Run C++ backend
-    auto [verts_flat, faces_flat, meta] = deform_surface(
-        mesh_path, handle_ids, tgt, roi_ids, method, alpha, max_iter);
+// ── deform_surface_with_angles ────────────────────────────────────────────────
 
-    // Convert flat verts → numpy (N, 3)
-    int nv = (int)verts_flat.size() / 3;
-    py::array_t<double> V_new({nv, 3});
-    std::copy(verts_flat.begin(), verts_flat.end(),
-              V_new.mutable_data());
+static py::tuple py_deform_surface_with_angles(
+    const std::string&      mesh_path,
+    const py::list&         handle_transforms_list,
+    const std::vector<int>& roi_ids,
+    const std::string&      method_str,
+    double alpha,
+    int    max_iter)
+{
+    std::vector<HandleTransform> transforms;
+    transforms.reserve(handle_transforms_list.size());
 
-    // Convert flat faces → numpy (M, 3)
-    int nf = (int)faces_flat.size() / 3;
-    py::array_t<int> F({nf, 3});
-    std::copy(faces_flat.begin(), faces_flat.end(),
-              F.mutable_data());
+    for (auto item : handle_transforms_list) {
+        py::dict d = item.cast<py::dict>();
 
-    // Build metadata dict
-    py::dict meta_dict;
-    meta_dict["template_mesh_path"] = meta.template_mesh_path;
-    meta_dict["method"]             = meta.method;
-    meta_dict["handle_ids"]         = meta.handle_ids;
-    meta_dict["target_positions"]   = meta.target_positions;
-    meta_dict["roi_ids"]            = meta.roi_ids;
-    meta_dict["alpha"]              = meta.alpha;
-    meta_dict["max_iter"]           = meta.max_iter;
+        if (!d.contains("vertex_id"))
+            throw std::invalid_argument("Each handle transform dict must have 'vertex_id'");
+        if (!d.contains("angle"))
+            throw std::invalid_argument("Each handle transform dict must have 'angle'");
+        if (!d.contains("ring_size"))
+            throw std::invalid_argument("Each handle transform dict must have 'ring_size'");
 
-    return py::make_tuple(V_new, F, meta_dict);
+        HandleTransform t;
+        t.vertex_id = d["vertex_id"].cast<int>();
+        t.angle     = d["angle"].cast<double>();
+        t.ring_size = d["ring_size"].cast<double>();
+        transforms.push_back(t);
+    }
+
+    auto [vf, ff, meta] = deform_surface_with_angles(
+        mesh_path, transforms, roi_ids, parse_method(method_str), alpha, max_iter);
+    return pack_result(vf, ff, meta);
 }
 
 // ── Module definition ─────────────────────────────────────────────────────────
@@ -111,12 +146,17 @@ static py::tuple py_deform_surface(
 PYBIND11_MODULE(graphop, m)
 {
     m.doc() = R"doc(
-graphop — CGAL-based surface deformation backend.
+graphop — CGAL-based surface deformation backend for pmConv Stage 1.
 
 Functions
 ---------
 deform_surface(mesh_path, handle_ids, target_positions, ...)
-    Deform a triangulated surface mesh using ARAP or SRE-ARAP.
+    Classic interface: deform using explicit target positions per handle.
+
+deform_surface_with_angles(mesh_path, handle_transforms, ...)
+    Rotation interface: each handle specifies vertex_id, angle, ring_size.
+    Target positions are computed via Rodrigues rotation around the surface
+    normal at each center vertex.
 )doc";
 
     m.def(
@@ -136,7 +176,7 @@ target_positions : np.ndarray, shape (H, 3) or (3*H,)
 roi_ids : list[int], optional
     Region-of-interest vertex indices.  Empty list (default) = whole mesh.
 method : str, optional
-    Deformation algorithm.  One of 'sre_arap' (default), 'original_arap',
+    Deformation algorithm: 'sre_arap' (default), 'original_arap',
     'spokes_and_rims'.
 alpha : float, optional
     SRE-ARAP smoothness weight (default 0.02; ignored for other methods).
@@ -146,18 +186,63 @@ max_iter : int, optional
 Returns
 -------
 V_new : np.ndarray, shape (N, 3), dtype float64
-    Deformed vertex positions.
-F : np.ndarray, shape (M, 3), dtype int32
-    Face connectivity (0-based indices, unchanged from input mesh).
-meta : dict
-    Deformation metadata: template_mesh_path, method, handle_ids,
-    target_positions, roi_ids, alpha, max_iter.
+F     : np.ndarray, shape (M, 3), dtype int32
+meta  : dict
 )doc",
         py::arg("mesh_path"),
         py::arg("handle_ids"),
         py::arg("target_positions"),
-        py::arg("roi_ids")    = std::vector<int>{},
-        py::arg("method")     = std::string("sre_arap"),
-        py::arg("alpha")      = 0.02,
-        py::arg("max_iter")   = 50);
+        py::arg("roi_ids")  = std::vector<int>{},
+        py::arg("method")   = std::string("sre_arap"),
+        py::arg("alpha")    = 0.02,
+        py::arg("max_iter") = 50);
+
+    m.def(
+        "deform_surface_with_angles",
+        &py_deform_surface_with_angles,
+        R"doc(
+Deform a surface using per-handle rotation specifications.
+
+Each handle is a dict with three required keys:
+    vertex_id  (int)   — 0-based index of the center vertex
+    angle      (float) — rotation angle in radians around the surface normal
+    ring_size  (float) — Euclidean radius; every vertex within this distance
+                         of the center vertex becomes a positional handle
+
+The target position for each handle vertex v is:
+    target = center + Rodrigues(v - center, normal_at_center, angle)
+
+If multiple handle dicts affect the same vertex, the last one wins.
+
+Parameters
+----------
+mesh_path : str
+    Path to the input OBJ mesh file.
+handle_transforms : list[dict]
+    Per-handle specifications.  Each dict must have 'vertex_id', 'angle',
+    'ring_size'.
+roi_ids : list[int], optional
+    Region-of-interest vertex indices.  Empty list (default) = whole mesh.
+method : str, optional
+    Deformation algorithm: 'sre_arap' (default), 'original_arap',
+    'spokes_and_rims'.
+alpha : float, optional
+    SRE-ARAP smoothness weight (default 0.02).
+max_iter : int, optional
+    Maximum ARAP iterations (default 50).
+
+Returns
+-------
+V_new : np.ndarray, shape (N, 3), dtype float64
+F     : np.ndarray, shape (M, 3), dtype int32
+meta  : dict
+    Includes 'transform_center_ids', 'transform_angles', 'transform_ring_sizes'
+    in addition to the standard deformation fields.
+)doc",
+        py::arg("mesh_path"),
+        py::arg("handle_transforms"),
+        py::arg("roi_ids")  = std::vector<int>{},
+        py::arg("method")   = std::string("sre_arap"),
+        py::arg("alpha")    = 0.02,
+        py::arg("max_iter") = 50);
 }

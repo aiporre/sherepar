@@ -28,7 +28,7 @@ import sys
 import numpy as np
 from pathlib import Path
 
-#  Locate the graphop extension ─
+# ── Locate the graphop extension ─────────────────────────────────────────────
 # The compiled extension (.so) is installed at the repo root by CMake.
 # Add the repo root to sys.path so "import graphop" works when running from
 # the examples/ directory.
@@ -39,7 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 from spherepar.benchmark import SurfaceFactory
 
 
-#  UTILS!! TODO: move to its how module ─
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def make_simple_handles(vertices: np.ndarray,
                         n_handles: int = 4,
@@ -74,7 +74,7 @@ def load_vertices(mesh_path: str) -> np.ndarray:
     return np.array(verts)
 
 
-#  Workflow A 
+# ── Workflow A ────────────────────────────────────────────────────────────────
 
 def workflow_a(factory: SurfaceFactory,
                template_vertices: np.ndarray,
@@ -108,7 +108,7 @@ def workflow_a(factory: SurfaceFactory,
         print(f"  [{i+1}/{n}] saved → {paths['labels']}")
 
 
-#  Workflow B 
+# ── Workflow B ────────────────────────────────────────────────────────────────
 
 def workflow_b(factory: SurfaceFactory,
                template_vertices: np.ndarray,
@@ -182,7 +182,56 @@ def workflow_b(factory: SurfaceFactory,
         print(f"  [{i+1}/{n}] saved → {paths['labels']}")
 
 
-#  Main 
+# ── Workflow C ────────────────────────────────────────────────────────────────
+
+def workflow_c(factory: SurfaceFactory,
+               template_vertices: np.ndarray,
+               n: int,
+               seed: int = 7) -> None:
+    """Rotation-based deformations: per-handle angle + ring_size.
+
+    Each handle is described by:
+      vertex_id  — center vertex of the local rotation
+      angle      — rotation amount in radians (around the surface normal)
+      ring_size  — Euclidean radius; all vertices within this distance of the
+                   center vertex become handles and are rotated by *angle*
+    """
+    print(f"\n=== Workflow C: {n} angle+ring_size deformed surfaces ===")
+    rng = np.random.default_rng(seed)
+    nv  = template_vertices.shape[0]
+
+    for i in range(n):
+        # Pick 2 random center vertices; assign independent angles and rings
+        center_ids  = rng.integers(0, nv, size=2).tolist()
+        angles      = rng.uniform(-0.4, 0.4, size=2).tolist()
+        ring_sizes  = rng.uniform(0.15, 0.45, size=2).tolist()
+
+        handle_transforms = [
+            {"vertex_id": int(vid), "angle": float(a), "ring_size": float(r)}
+            for vid, a, r in zip(center_ids, angles, ring_sizes)
+        ]
+
+        # Random center vertex for the isotropic signal
+        center_idx = int(rng.integers(0, nv))
+
+        surface = factory.generate_surface_with_angles(
+            handle_transforms = handle_transforms,
+            method            = "sre_arap",
+            alpha             = 0.02,
+            max_iter          = 50,
+            signal_type       = "isotropic",
+            signal_params     = {"center": center_idx, "sigma": 0.2, "amplitude": 1.0},
+            fname             = f"wfC_{i:03d}",
+        )
+        paths = surface.save()
+        # Print the handles so it's clear what parameters were used
+        for h in handle_transforms:
+            print(f"    handle: vertex={h['vertex_id']:4d}  "
+                  f"angle={h['angle']:+.3f} rad  ring={h['ring_size']:.3f}")
+        print(f"  [{i+1}/{n}] saved → {paths['labels']}")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -226,6 +275,7 @@ def main():
 
     workflow_a(factory, template_vertices, n=args.n)
     workflow_b(factory, template_vertices, n=args.n)
+    workflow_c(factory, template_vertices, n=args.n)
 
     print(f"\nDone! Output written to: {args.root}")
     print("  surfaces/  — OBJ meshes")

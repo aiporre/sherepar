@@ -28,17 +28,40 @@ enum class DeformMethod {
 };
 
 /**
+ * Per-handle rotation specification for deform_surface_with_angles().
+ *
+ * vertex_id  : 0-based index of the center vertex.
+ * angle      : Rotation angle in radians around the surface normal at vertex_id.
+ * ring_size  : Euclidean radius. Every mesh vertex whose distance from vertex_id
+ *              is <= ring_size becomes a control vertex, rotated by angle around
+ *              the surface normal at vertex_id.
+ */
+struct HandleTransform {
+    int    vertex_id;
+    double angle;
+    double ring_size;
+};
+
+/**
  * Metadata returned alongside deformed geometry.
+ *
+ * For deform_surface()             : transform_* vectors are empty.
+ * For deform_surface_with_angles() : transform_* vectors record the original
+ *                                    HandleTransform inputs.
  */
 struct DeformMeta {
     std::string template_mesh_path;    ///< Path to the source OBJ mesh
     std::string method;                ///< Algorithm name as string
-    std::vector<int> handle_ids;       ///< Vertex indices used as handles
-    /// Target positions corresponding to each handle (flat: [x0,y0,z0, x1,y1,z1, ...])
-    std::vector<double> target_positions;
-    std::vector<int> roi_ids;          ///< Region-of-interest vertex indices (empty = full mesh)
+    std::vector<int>    handle_ids;    ///< Vertex indices used as handles
+    std::vector<double> target_positions; ///< Flat [x,y,z,...] target per handle
+    std::vector<int>    roi_ids;       ///< ROI vertex indices (empty = full mesh)
     double alpha;                      ///< SRE_ARAP smoothness weight
-    int max_iter;                      ///< Maximum deformation iterations
+    int    max_iter;                   ///< Maximum deformation iterations
+
+    // Fields set only by deform_surface_with_angles
+    std::vector<int>    transform_center_ids;
+    std::vector<double> transform_angles;
+    std::vector<double> transform_ring_sizes;
 };
 
 /**
@@ -53,18 +76,43 @@ struct DeformMeta {
  * @param alpha             SRE_ARAP smoothness parameter (ignored for other methods).
  * @param max_iter          Maximum ARAP iterations.
  *
- * @returns Tuple (vertices, faces, meta) where:
- *   - vertices is a flat array of doubles [x0,y0,z0, x1,y1,z1, ...], size 3*N
- *   - faces    is a flat array of ints   [a0,b0,c0, a1,b1,c1, ...], size 3*M
- *   - meta     is a DeformMeta struct
- *
- * @throws std::runtime_error on any error (file not found, bad indices, CGAL failure).
+ * @returns Tuple (vertices, faces, meta).
+ * @throws std::runtime_error on any error.
  */
 std::tuple<std::vector<double>, std::vector<int>, DeformMeta>
 deform_surface(
     const std::string& mesh_path,
     const std::vector<int>& handle_ids,
     const std::vector<double>& target_positions,
+    const std::vector<int>& roi_ids = {},
+    DeformMethod method = DeformMethod::SRE_ARAP,
+    double alpha = 0.02,
+    int max_iter = 50
+);
+
+/**
+ * Deform a surface using per-handle rotation specifications.
+ *
+ * For each HandleTransform t:
+ *   1. Center c = position of vertex t.vertex_id.
+ *   2. Rotation axis k = area-weighted surface normal at t.vertex_id.
+ *   3. Every vertex v with ||v - c|| <= t.ring_size becomes a control vertex;
+ *      its target is c + Eigen::Quaterniond(AngleAxisd(t.angle, k)) * (v - c).
+ *
+ * @param mesh_path          Path to the input OBJ mesh file.
+ * @param handle_transforms  Per-handle rotation specifications.
+ * @param roi_ids            Optional ROI.  Empty = whole mesh.
+ * @param method             Deformation algorithm (default: SRE_ARAP).
+ * @param alpha              SRE_ARAP smoothness weight.
+ * @param max_iter           Maximum ARAP iterations.
+ *
+ * @returns Tuple (vertices, faces, meta).
+ * @throws std::runtime_error on any error.
+ */
+std::tuple<std::vector<double>, std::vector<int>, DeformMeta>
+deform_surface_with_angles(
+    const std::string& mesh_path,
+    const std::vector<HandleTransform>& handle_transforms,
     const std::vector<int>& roi_ids = {},
     DeformMethod method = DeformMethod::SRE_ARAP,
     double alpha = 0.02,

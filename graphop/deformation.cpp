@@ -1,7 +1,7 @@
 /**
  * deformation.cpp
  *
- * CGAL Surface_mesh_deformation backend for pmConv PoF.
+ * CGAL Surface_mesh_deformation backend for pmConv Stage 1.
  *
  * Reads an OBJ mesh, applies ARAP / SRE-ARAP deformation with
  * positional constraints, and returns the deformed
@@ -17,31 +17,34 @@
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Surface_mesh_deformation.h>
+#include <CGAL/Polygon_mesh_processing/compute_normal.h>
 
 // I/O to read stuff
 #include <CGAL/IO/OBJ.h>
 
+// Eigen for quaternion-based rotations
+#include <Eigen/Geometry>
+
 #include <fstream>
 #include <sstream>
 #include <algorithm>
-#include <cstring>
+#include <cmath>
 #include <map>
 
-// Aliases:  short names
+// Aliases: short names
 using Kernel    = CGAL::Simple_cartesian<double>;
 using Point_3   = Kernel::Point_3;
+using Vector_3  = Kernel::Vector_3;
 using SurfMesh  = CGAL::Surface_mesh<Point_3>;
 using VD        = SurfMesh::Vertex_index;
-using vertex_iterator = SurfMesh::Vertex_iterator;
-using edge_descriptor = SurfMesh::edge_descriptor;
-using halfedge_descriptor = SurfMesh::halfedge_descriptor;
-using vertex_descriptor = SurfMesh::vertex_descriptor;
-using vertex_ring = std::vector<vertex_descriptor>;
-// Deformation object instantiated for SRE_ARAP (the richest; we use the same
-// type and just ignore alpha when running plain ARAP).
-// This another shortcut to avoid writting the full template signature everywhere.
-// The actual algorithm is selected at runtime via the DeformMethod enum,
-// but we need to instantiate the template for all cases
+// In CGAL 5.x the nested graph-traits types (vertex_descriptor, edge_descriptor,
+// halfedge_descriptor) are NOT nested members of Surface_mesh — they live inside
+// boost::graph_traits<SurfMesh>.  We keep the master branch's naming convention
+// but bind them to the correct types via Vertex_index / Halfedge_index.
+using vertex_descriptor    = VD;                            // = SurfMesh::Vertex_index
+using vertex_ring          = std::vector<vertex_descriptor>;
+
+// Deformation object instantiated for each algorithm tag.
 template <CGAL::Deformation_algorithm_tag TAG>
 using Deformer = CGAL::Surface_mesh_deformation<SurfMesh, CGAL::Default,
                                                  CGAL::Default, TAG>;
@@ -176,7 +179,30 @@ static vertex_ring extract_k_ring(const SurfMesh& mesh, vertex_descriptor v, int
   return Q;
 }
 
-// compute normal to a vertex
+/**
+ * Collect all mesh vertices within Euclidean distance ring_size of center.
+ * At minimum the center vertex itself is always included.
+ */
+static vertex_ring extract_euclidean_ring(const SurfMesh& mesh,
+                                           vertex_descriptor center,
+                                           double ring_size)
+{
+    const Point_3& cp = mesh.point(center);
+    const double ring_sq = ring_size * ring_size;
+    vertex_ring ring;
+    for (auto v : mesh.vertices()) {
+        const Point_3& p = mesh.point(v);
+        double dx = p.x()-cp.x(), dy = p.y()-cp.y(), dz = p.z()-cp.z();
+        if (dx*dx + dy*dy + dz*dz <= ring_sq)
+            ring.push_back(v);
+    }
+    // guarantee center is present even when ring_size == 0
+    if (ring.empty())
+        ring.push_back(center);
+    return ring;
+}
+
+// compute area-weighted normal at a vertex using CGAL's face normal helper
 static Vector_3 vertex_normal(const SurfMesh& mesh, vertex_descriptor v)
 {
     Vector_3 n(0.0, 0.0, 0.0);
@@ -200,7 +226,6 @@ static Vector_3 vertex_normal(const SurfMesh& mesh, vertex_descriptor v)
     return n;
 }
 
-
 // run deformation for a specific CGAL::Deformation_algorithm_tag, called by the public API
 
 template <CGAL::Deformation_algorithm_tag TAG>
@@ -221,10 +246,12 @@ run_deformation(
 
     SurfMesh mesh = build_cgal_mesh(raw_verts, raw_faces);
 
-
     int nv = (int)mesh.num_vertices();
 
-    //  index validaiton
+    //  index validation
+    if (handle_ids.empty())
+        throw std::runtime_error("handle_ids must not be empty");
+
     std::cout << "handle_ids: " << handle_ids.size() << " handles, roi_ids: " << roi_ids.size() << " ROI vertices\n";
     for (int id : handle_ids)
         if (id < 0 || id >= nv)
@@ -275,7 +302,7 @@ run_deformation(
 
     deformer.deform(static_cast<unsigned int>(max_iter), /*tolerance=*/1e-4);
 
-    // ── Collect results ────────────────────────────────────────────────────
+    // Collect results
     auto out_verts = extract_vertices(mesh);
     auto out_faces = extract_faces(mesh);
 
@@ -295,15 +322,24 @@ run_deformation(
 }
 
 
-
+/**
+ * Per-handle rotation deformation.
+ *
+ * For each handle:
+ *   - collect all vertices within ring_size (Euclidean) of the center vertex
+ *   - compute the surface normal at the center via area-weighted face normals
+ *   - build an Eigen quaternion from AngleAxisd(angle, normal)
+ *   - for each ring vertex v: target = center + quat * (v - center)
+ *   - register all ring vertices as control vertices and set their targets
+ */
 template <CGAL::Deformation_algorithm_tag TAG>
 static std::tuple<std::vector<double>, std::vector<int>, graphop::DeformMeta>
 run_deformation_with_angle(
     const std::string& mesh_path,
     const std::vector<int>& handle_ids,
-    const std::vector<double>& target_positions,
+    const std::vector<double>& angles,
+    const std::vector<double>& ring_sizes,
     const std::vector<int>& roi_ids,
-    double angle,
     double alpha,
     int max_iter)
 {
@@ -315,18 +351,17 @@ run_deformation_with_angle(
 
     SurfMesh mesh = build_cgal_mesh(raw_verts, raw_faces);
 
-
     int nv = (int)mesh.num_vertices();
 
-    //  index validaiton
+    //  index validation
+    if (handle_ids.empty())
+        throw std::runtime_error("handle_ids must not be empty");
+
     std::cout << "handle_ids: " << handle_ids.size() << " handles, roi_ids: " << roi_ids.size() << " ROI vertices\n";
     for (int id : handle_ids)
         if (id < 0 || id >= nv)
             throw std::runtime_error("handle_id " + std::to_string(id) +
                                      " out of range [0, " + std::to_string(nv) + ")");
-
-    if ((int)target_positions.size() != (int)handle_ids.size() * 3)
-        throw std::runtime_error("target_positions length must equal 3 * handle_ids.size()");
 
     for (int id : roi_ids)
         if (id < 0 || id >= nv)
@@ -342,9 +377,6 @@ run_deformation_with_angle(
     // Region of interest: full mesh if roi_ids is empty
     if (roi_ids.empty()) {
         std::cout << "Using full mesh as ROI (" << nv << " vertices)\n";
-//        vertex_iterator vb, ve;
-//        std::tie(vb,ve) = vertices(mesh);
-//        deformer.insert_roi_vertices(vb, ve);
         for (auto v : mesh.vertices())
             deformer.insert_roi_vertex(v);
     } else {
@@ -353,17 +385,14 @@ run_deformation_with_angle(
             deformer.insert_roi_vertex(VD(id));
     }
 
-    // list of vertices descriptors for the rings
+    // list of vertex rings, one per handle
     std::vector<vertex_ring> rings;
-    // Control vertices (handles)
-    std::cout << "Using rotation and translation constraints for handles\n";
-    // deformer.set_rotation_and_translation_constraints(true);
-    for (int id : handle_ids) {
-        const auto ring = extract_k_ring(mesh, VD(id), 1);
+    std::cout << "Using rotation constraints for handles\n";
+    for (int i = 0; i < (int)handle_ids.size(); ++i) {
+        const auto ring = extract_euclidean_ring(mesh, VD(handle_ids[i]), ring_sizes[i]);
         rings.push_back(ring);
         for (auto v : ring)
             deformer.insert_control_vertex(v);
-        }
     }
 
     bool ok = deformer.preprocess();
@@ -371,40 +400,55 @@ run_deformation_with_angle(
         throw std::runtime_error("CGAL deformer preprocessing failed; "
                                  "check mesh validity and handle/ROI configuration.");
 
-    // Apply target positions
+    // Apply per-handle rotation targets
     for (int i = 0; i < (int)handle_ids.size(); ++i) {
         const VD h = VD(handle_ids[i]);
+        const Point_3& center = mesh.point(h);
         const vertex_ring& ring = rings[i];
 
-        // translation target (as you already do)
-        Point_3 translation(target_positions[3*i],
-                            target_positions[3*i+1],
-                            target_positions[3*i+2]);
-
-        // axis = handle normal
+        // axis = surface normal at handle center
         Vector_3 n = vertex_normal(mesh, h);
         const double nlen = std::sqrt(n.squared_length());
-        if (nlen == 0.0) {
+        if (nlen == 0.0)
             throw std::runtime_error("Zero normal at handle " + std::to_string(handle_ids[i]));
-        }
 
         Eigen::Vector3d axis(n.x() / nlen, n.y() / nlen, n.z() / nlen);
 
-        // angle is in radians
-        // TODO: use btter one angle per target for now it is the same for all targets
-        Eigen::Quaterniond quat(Eigen::AngleAxisd(angle, axis));
+        // Build quaternion from angle-axis (Eigen)
+        Eigen::Quaterniond quat(Eigen::AngleAxisd(angles[i], axis));
 
-        // CGAL API expects (control_vertex, target_position, quaternion)
-        deformer.rotate(ring.begin(), ring.end(), translation, quat);
-
-     }
-
+        // For each vertex in the ring: rotate its displacement around the center
+        for (auto v : ring) {
+            const Point_3& p = mesh.point(v);
+            Eigen::Vector3d disp(p.x() - center.x(),
+                                 p.y() - center.y(),
+                                 p.z() - center.z());
+            Eigen::Vector3d rotated = quat * disp;
+            Point_3 target(center.x() + rotated.x(),
+                           center.y() + rotated.y(),
+                           center.z() + rotated.z());
+            deformer.set_target_position(v, target);
+        }
+    }
 
     deformer.deform(static_cast<unsigned int>(max_iter), /*tolerance=*/1e-4);
 
-    // ── Collect results ────────────────────────────────────────────────────
+    // Collect results
     auto out_verts = extract_vertices(mesh);
     auto out_faces = extract_faces(mesh);
+
+    // Build metadata — flatten expanded handle ids + targets from the deformer state
+    std::vector<int>    exp_handle_ids;
+    std::vector<double> exp_targets;
+    for (int i = 0; i < (int)handle_ids.size(); ++i) {
+        for (auto v : rings[i]) {
+            const Point_3& p = mesh.point(v); // deformed position
+            exp_handle_ids.push_back(v.idx());
+            exp_targets.push_back(p.x());
+            exp_targets.push_back(p.y());
+            exp_targets.push_back(p.z());
+        }
+    }
 
     graphop::DeformMeta meta;
     meta.template_mesh_path = mesh_path;
@@ -412,11 +456,11 @@ run_deformation_with_angle(
         TAG == CGAL::ORIGINAL_ARAP   ? graphop::DeformMethod::ORIGINAL_ARAP :
         TAG == CGAL::SPOKES_AND_RIMS ? graphop::DeformMethod::SPOKES_AND_RIMS :
                                        graphop::DeformMethod::SRE_ARAP);
-    meta.handle_ids          = handle_ids;
-    meta.target_positions    = target_positions;
-    meta.roi_ids             = roi_ids;
-    meta.alpha               = alpha;
-    meta.max_iter            = max_iter;
+    meta.handle_ids       = exp_handle_ids;
+    meta.target_positions = exp_targets;
+    meta.roi_ids          = roi_ids;
+    meta.alpha            = alpha;
+    meta.max_iter         = max_iter;
 
     return {out_verts, out_faces, meta};
 }
@@ -433,21 +477,70 @@ deform_surface(
     const std::vector<int>& roi_ids,
     DeformMethod method,
     double alpha,
-    int max_iter,
-    bool use_rotation_and_translation)
+    int max_iter)
 {
     switch (method) {
         case DeformMethod::ORIGINAL_ARAP:
             return run_deformation<CGAL::ORIGINAL_ARAP>(
-                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter, use_rotation_and_translation);
+                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter);
         case DeformMethod::SPOKES_AND_RIMS:
             return run_deformation<CGAL::SPOKES_AND_RIMS>(
-                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter, use_rotation_and_translation);
+                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter);
         case DeformMethod::SRE_ARAP:
             return run_deformation<CGAL::SRE_ARAP>(
-                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter, use_rotation_and_translation);
+                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter);
     }
     throw std::runtime_error("Unknown deformation method");
+}
+
+std::tuple<std::vector<double>, std::vector<int>, DeformMeta>
+deform_surface_with_angles(
+    const std::string& mesh_path,
+    const std::vector<HandleTransform>& handle_transforms,
+    const std::vector<int>& roi_ids,
+    DeformMethod method,
+    double alpha,
+    int max_iter)
+{
+    if (handle_transforms.empty())
+        throw std::runtime_error("handle_transforms must not be empty");
+
+    // unpack the per-handle parameters
+    std::vector<int>    handle_ids;
+    std::vector<double> angles, ring_sizes;
+    for (const auto& t : handle_transforms) {
+        handle_ids.push_back(t.vertex_id);
+        angles.push_back(t.angle);
+        ring_sizes.push_back(t.ring_size);
+    }
+
+    std::tuple<std::vector<double>, std::vector<int>, DeformMeta> result;
+    switch (method) {
+        case DeformMethod::ORIGINAL_ARAP:
+            result = run_deformation_with_angle<CGAL::ORIGINAL_ARAP>(
+                mesh_path, handle_ids, angles, ring_sizes, roi_ids, alpha, max_iter);
+            break;
+        case DeformMethod::SPOKES_AND_RIMS:
+            result = run_deformation_with_angle<CGAL::SPOKES_AND_RIMS>(
+                mesh_path, handle_ids, angles, ring_sizes, roi_ids, alpha, max_iter);
+            break;
+        case DeformMethod::SRE_ARAP:
+            result = run_deformation_with_angle<CGAL::SRE_ARAP>(
+                mesh_path, handle_ids, angles, ring_sizes, roi_ids, alpha, max_iter);
+            break;
+        default:
+            throw std::runtime_error("Unknown deformation method");
+    }
+
+    // augment metadata with the original transform parameters
+    auto& meta = std::get<2>(result);
+    for (const auto& t : handle_transforms) {
+        meta.transform_center_ids.push_back(t.vertex_id);
+        meta.transform_angles.push_back(t.angle);
+        meta.transform_ring_sizes.push_back(t.ring_size);
+    }
+
+    return result;
 }
 
 } // namespace graphop
