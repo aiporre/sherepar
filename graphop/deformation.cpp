@@ -446,6 +446,7 @@ run_deformation_with_angle(
         // For each vertex in the ring: rotate its displacement around the center
         std::cout  << "we are rotating handle " << handle_ids[i] << " with angle " << angles[i]
                    << " and ring size " << ring_sizes[i] << ", affecting " << ring.size() << " vertices\n";
+        std::cout << "center: (" << center.x() << ", " << center.y() << ", " << center.z() << ")\n";
         deformer.rotate(ring.begin(), ring.end(), center, quat);
 //        for (auto v : ring) {
 //            const Point_3& p = mesh.point(v);
