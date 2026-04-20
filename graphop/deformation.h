@@ -40,6 +40,7 @@ struct HandleTransform {
     int    vertex_id;
     double angle;
     double ring_size;
+    std::vector<double> center_coords; // optional 3D coordinates for the rotation center; if empty, use vertex position
 };
 
 /**
@@ -62,6 +63,7 @@ struct DeformMeta {
     std::vector<int>    transform_center_ids;
     std::vector<double> transform_angles;
     std::vector<double> transform_ring_sizes;
+    std::vector<double> transform_center_coords; ///< Flat [x,y,z,...] center used per transform
 };
 
 /**

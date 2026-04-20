@@ -17,6 +17,7 @@
  *           angle      (float)  — rotation angle in radians
  *           ring_size  (float)  — radius; all vertices within this distance
  *                                 of the center vertex become handles
+ *           center_coords (list[float], optional len=3) — custom rotation center
  *
  * Both functions return (V_new, F, meta) where:
  *   V_new — NumPy array [N, 3] float64
@@ -70,6 +71,7 @@ static py::tuple pack_result(
     d["transform_center_ids"]   = meta.transform_center_ids;
     d["transform_angles"]       = meta.transform_angles;
     d["transform_ring_sizes"]   = meta.transform_ring_sizes;
+    d["transform_center_coords"] = meta.transform_center_coords;
 
     return py::make_tuple(V_new, F, d);
 }
@@ -133,6 +135,15 @@ static py::tuple py_deform_surface_with_angles(
         t.vertex_id = d["vertex_id"].cast<int>();
         t.angle     = d["angle"].cast<double>();
         t.ring_size = d["ring_size"].cast<double>();
+
+        if (d.contains("center_coords")) {
+            t.center_coords = d["center_coords"].cast<std::vector<double>>();
+            if (t.center_coords.size() != 3) {
+                throw std::invalid_argument(
+                    "'center_coords' must be a 3-element list [x, y, z] when provided");
+            }
+        }
+
         transforms.push_back(t);
     }
 
@@ -209,6 +220,10 @@ Each handle is a dict with three required keys:
     ring_size  (float) — Euclidean radius; every vertex within this distance
                          of the center vertex becomes a positional handle
 
+Optional key:
+    center_coords (list[float], len=3) — custom [x, y, z] rotation center.
+    If omitted, the center vertex position is used.
+
 The target position for each handle vertex v is:
     target = center + Rodrigues(v - center, normal_at_center, angle)
 
@@ -220,7 +235,7 @@ mesh_path : str
     Path to the input OBJ mesh file.
 handle_transforms : list[dict]
     Per-handle specifications.  Each dict must have 'vertex_id', 'angle',
-    'ring_size'.
+    'ring_size', and may optionally include 'center_coords'.
 roi_ids : list[int], optional
     Region-of-interest vertex indices.  Empty list (default) = whole mesh.
 method : str, optional
@@ -236,8 +251,8 @@ Returns
 V_new : np.ndarray, shape (N, 3), dtype float64
 F     : np.ndarray, shape (M, 3), dtype int32
 meta  : dict
-    Includes 'transform_center_ids', 'transform_angles', 'transform_ring_sizes'
-    in addition to the standard deformation fields.
+    Includes 'transform_center_ids', 'transform_angles', 'transform_ring_sizes',
+    and 'transform_center_coords' in addition to the standard deformation fields.
 )doc",
         py::arg("mesh_path"),
         py::arg("handle_transforms"),

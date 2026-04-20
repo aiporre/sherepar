@@ -338,6 +338,8 @@ run_deformation_with_angle(
     const std::string& mesh_path,
     const std::vector<int>& handle_ids,
     const std::vector<double>& angles,
+    const std::vector<double>& center_coords, // flat [x,y,z,...], one triple per handle
+    const std::vector<char>& has_center_coords, // 1 if center_coords for handle is explicitly provided
     const std::vector<double>& ring_sizes,
     const std::vector<int>& roi_ids,
     double alpha,
@@ -395,6 +397,28 @@ run_deformation_with_angle(
             deformer.insert_control_vertex(v);
     }
 
+    if (angles.size() != handle_ids.size())
+        throw std::runtime_error("angles length must equal handle_ids.size()");
+    if (ring_sizes.size() != handle_ids.size())
+        throw std::runtime_error("ring_sizes length must equal handle_ids.size()");
+    if (center_coords.size() != handle_ids.size() * 3)
+        throw std::runtime_error("center_coords length must equal 3 * handle_ids.size()");
+    if (has_center_coords.size() != handle_ids.size())
+        throw std::runtime_error("has_center_coords length must equal handle_ids.size()");
+
+    std::vector<Eigen::Vector3d> centers;
+    centers.reserve(handle_ids.size());
+    for (int i = 0; i < (int)handle_ids.size(); ++i) {
+        if (has_center_coords[i]) {
+            centers.emplace_back(center_coords[3*i], center_coords[3*i+1], center_coords[3*i+2]);
+        } else {
+            const Point_3& p = mesh.point(VD(handle_ids[i]));
+            // centers.emplace_back(p.x(), p.y(), p.z());
+            // put zeros
+            centers.emplace_back(0.0, 0.0, 0.0);
+        }
+    }
+
     bool ok = deformer.preprocess();
     if (!ok)
         throw std::runtime_error("CGAL deformer preprocessing failed; "
@@ -403,7 +427,9 @@ run_deformation_with_angle(
     // Apply per-handle rotation targets
     for (int i = 0; i < (int)handle_ids.size(); ++i) {
         const VD h = VD(handle_ids[i]);
-        const Point_3& center = mesh.point(h);
+//        const Point_3& center = mesh.point(h);
+//        const Eigen::Vector3d center = Eigen::Vector3d(0.0, 0.0, 0.0); // rotation center is the origin, we rotate the displacements
+        const Eigen::Vector3d center = centers[i];
         const vertex_ring& ring = rings[i];
 
         // axis = surface normal at handle center
@@ -418,17 +444,20 @@ run_deformation_with_angle(
         Eigen::Quaterniond quat(Eigen::AngleAxisd(angles[i], axis));
 
         // For each vertex in the ring: rotate its displacement around the center
-        for (auto v : ring) {
-            const Point_3& p = mesh.point(v);
-            Eigen::Vector3d disp(p.x() - center.x(),
-                                 p.y() - center.y(),
-                                 p.z() - center.z());
-            Eigen::Vector3d rotated = quat * disp;
-            Point_3 target(center.x() + rotated.x(),
-                           center.y() + rotated.y(),
-                           center.z() + rotated.z());
-            deformer.set_target_position(v, target);
-        }
+        std::cout  << "we are rotating handle " << handle_ids[i] << " with angle " << angles[i]
+                   << " and ring size " << ring_sizes[i] << ", affecting " << ring.size() << " vertices\n";
+        deformer.rotate(ring.begin(), ring.end(), center, quat);
+//        for (auto v : ring) {
+//            const Point_3& p = mesh.point(v);
+//            Eigen::Vector3d disp(p.x() - center.x(),
+//                                 p.y() - center.y(),
+//                                 p.z() - center.z());
+//            Eigen::Vector3d rotated = quat * disp;
+//            Point_3 target(center.x() + rotated.x(),
+//                           center.y() + rotated.y(),
+//                           center.z() + rotated.z());
+//            deformer.set_target_position(v, target);
+//        }
     }
 
     deformer.deform(static_cast<unsigned int>(max_iter), /*tolerance=*/1e-4);
@@ -461,6 +490,12 @@ run_deformation_with_angle(
     meta.roi_ids          = roi_ids;
     meta.alpha            = alpha;
     meta.max_iter         = max_iter;
+    meta.transform_center_coords.reserve(centers.size() * 3);
+    for (const auto& c : centers) {
+        meta.transform_center_coords.push_back(c.x());
+        meta.transform_center_coords.push_back(c.y());
+        meta.transform_center_coords.push_back(c.z());
+    }
 
     return {out_verts, out_faces, meta};
 }
@@ -507,26 +542,44 @@ deform_surface_with_angles(
 
     // unpack the per-handle parameters
     std::vector<int>    handle_ids;
-    std::vector<double> angles, ring_sizes;
+    std::vector<double> angles, ring_sizes, center_coords;
+    std::vector<char>   has_center_coords;
+    center_coords.reserve(handle_transforms.size() * 3);
+    has_center_coords.reserve(handle_transforms.size());
     for (const auto& t : handle_transforms) {
         handle_ids.push_back(t.vertex_id);
         angles.push_back(t.angle);
         ring_sizes.push_back(t.ring_size);
+
+        if (!t.center_coords.empty()) {
+            if (t.center_coords.size() != 3)
+                throw std::runtime_error("center_coords for handle " + std::to_string(t.vertex_id) +
+                                         " must have length 3 if provided");
+            center_coords.push_back(t.center_coords[0]);
+            center_coords.push_back(t.center_coords[1]);
+            center_coords.push_back(t.center_coords[2]);
+            has_center_coords.push_back(1);
+        } else {
+            center_coords.push_back(0.0);
+            center_coords.push_back(0.0);
+            center_coords.push_back(0.0);
+            has_center_coords.push_back(0);
+        }
     }
 
     std::tuple<std::vector<double>, std::vector<int>, DeformMeta> result;
     switch (method) {
         case DeformMethod::ORIGINAL_ARAP:
             result = run_deformation_with_angle<CGAL::ORIGINAL_ARAP>(
-                mesh_path, handle_ids, angles, ring_sizes, roi_ids, alpha, max_iter);
+                mesh_path, handle_ids, angles, center_coords, has_center_coords, ring_sizes, roi_ids, alpha, max_iter);
             break;
         case DeformMethod::SPOKES_AND_RIMS:
             result = run_deformation_with_angle<CGAL::SPOKES_AND_RIMS>(
-                mesh_path, handle_ids, angles, ring_sizes, roi_ids, alpha, max_iter);
+                mesh_path, handle_ids, angles, center_coords, has_center_coords, ring_sizes, roi_ids, alpha, max_iter);
             break;
         case DeformMethod::SRE_ARAP:
             result = run_deformation_with_angle<CGAL::SRE_ARAP>(
-                mesh_path, handle_ids, angles, ring_sizes, roi_ids, alpha, max_iter);
+                mesh_path, handle_ids, angles, center_coords, has_center_coords, ring_sizes, roi_ids, alpha, max_iter);
             break;
         default:
             throw std::runtime_error("Unknown deformation method");

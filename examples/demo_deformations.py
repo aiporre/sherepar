@@ -203,12 +203,14 @@ def workflow_c(factory: SurfaceFactory,
     for i in range(n):
         # Pick 2 random center vertices; assign independent angles and rings
         center_ids  = rng.integers(0, nv, size=2).tolist()
-        angles      = rng.uniform(-0.4, 0.4, size=2).tolist()
+        #angles      = rng.uniform(-0.4, 0.4, size=2).tolist()
+        angles      = rng.uniform(-0.5, 0.5, size=2).tolist()
         ring_sizes  = rng.uniform(0.15, 0.45, size=2).tolist()
+        center_coords = rng.uniform(-0.5, 0.5, size=3).tolist()
 
         handle_transforms = [
-            {"vertex_id": int(vid), "angle": float(a), "ring_size": float(r)}
-            for vid, a, r in zip(center_ids, angles, ring_sizes)
+            {"vertex_id": int(vid), "angle": float(a), "ring_size": float(r), "center_coords": center_coords}
+            for vid, a, r, cc in zip(center_ids, angles, ring_sizes, center_coords)
         ]
 
         # Random center vertex for the isotropic signal
