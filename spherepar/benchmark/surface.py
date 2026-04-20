@@ -48,6 +48,7 @@ from spherepar.benchmark.signals import isotropic_gaussian, anisotropic_gaussian
 # ---------------------------------------------------------------------------
 try:
     import graphop as _graphop  # compiled pybind11 extension
+
     _GRAPHOP_AVAILABLE = True
 except ImportError:
     _graphop = None  # type: ignore[assignment]
@@ -84,21 +85,21 @@ class Surface:
     """
 
     def __init__(
-        self,
-        vertices: np.ndarray,
-        faces: np.ndarray,
-        deform_meta: Dict[str, Any],
-        root: str,
-        fname: str,
-        signal: Optional[np.ndarray] = None,
-        signal_meta: Optional[Dict[str, Any]] = None,
+            self,
+            vertices: np.ndarray,
+            faces: np.ndarray,
+            deform_meta: Dict[str, Any],
+            root: str,
+            fname: str,
+            signal: Optional[np.ndarray] = None,
+            signal_meta: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self.vertices:    np.ndarray          = np.asarray(vertices, dtype=np.float64)
-        self.faces:       np.ndarray          = np.asarray(faces,    dtype=np.int32)
-        self.deform_meta: Dict[str, Any]      = dict(deform_meta)
-        self.root:        str                 = str(root)
-        self.fname:       str                 = str(fname)
-        self.signal:      Optional[np.ndarray]       = (
+        self.vertices: np.ndarray = np.asarray(vertices, dtype=np.float64)
+        self.faces: np.ndarray = np.asarray(faces, dtype=np.int32)
+        self.deform_meta: Dict[str, Any] = dict(deform_meta)
+        self.root: str = str(root)
+        self.fname: str = str(fname)
+        self.signal: Optional[np.ndarray] = (
             np.asarray(signal, dtype=np.float64) if signal is not None else None)
         self.signal_meta: Optional[Dict[str, Any]] = (
             dict(signal_meta) if signal_meta is not None else None)
@@ -106,9 +107,9 @@ class Surface:
     #  Mutation helpers 
 
     def update_signal(
-        self,
-        signal: np.ndarray,
-        signal_meta: Optional[Dict[str, Any]] = None,
+            self,
+            signal: np.ndarray,
+            signal_meta: Optional[Dict[str, Any]] = None,
     ) -> "Surface":
         """Return a copy of this surface with a new signal attached.
 
@@ -126,7 +127,7 @@ class Surface:
             (not duplicated) since it is immutable after deformation.
         """
         new = copy.copy(self)
-        new.signal      = np.asarray(signal, dtype=np.float64)
+        new.signal = np.asarray(signal, dtype=np.float64)
         new.signal_meta = dict(signal_meta) if signal_meta is not None else {}
         return new
 
@@ -169,15 +170,15 @@ class Surface:
         """
         root = Path(self.root)
         surfaces_dir = root / "surfaces"
-        labels_dir   = root / "labels"
-        signals_dir  = root / "signals"
+        labels_dir = root / "labels"
+        signals_dir = root / "signals"
 
         surfaces_dir.mkdir(parents=True, exist_ok=True)
-        labels_dir.mkdir(  parents=True, exist_ok=True)
-        signals_dir.mkdir( parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        signals_dir.mkdir(parents=True, exist_ok=True)
 
         surface_path = surfaces_dir / f"{self.fname}.obj"
-        labels_path  = labels_dir   / f"{self.fname}.json"
+        labels_path = labels_dir / f"{self.fname}.json"
 
         #  Write OBJ 
         self._write_obj(surface_path)
@@ -190,20 +191,20 @@ class Surface:
 
         #  Write metadata JSON 
         metadata = {
-            "fname":               self.fname,
-            "surface_file":        str(surface_path),
-            "signal_file":         str(signal_path) if signal_path else None,
-            "deformation":         self._json_safe(self.deform_meta),
-            "signal":              self._json_safe(self.signal_meta) if self.signal_meta else None,
-            "n_vertices":          int(self.vertices.shape[0]),
-            "n_faces":             int(self.faces.shape[0]),
+            "fname": self.fname,
+            "surface_file": str(surface_path),
+            "signal_file": str(signal_path) if signal_path else None,
+            "deformation": self._json_safe(self.deform_meta),
+            "signal": self._json_safe(self.signal_meta) if self.signal_meta else None,
+            "n_vertices": int(self.vertices.shape[0]),
+            "n_faces": int(self.faces.shape[0]),
         }
         with open(labels_path, "w") as fh:
             json.dump(metadata, fh, indent=2)
 
         result: Dict[str, str] = {
             "surface": str(surface_path),
-            "labels":  str(labels_path),
+            "labels": str(labels_path),
         }
         if signal_path is not None:
             result["signal"] = str(signal_path)
@@ -222,7 +223,7 @@ class Surface:
             fh.write("\n")
             for f in self.faces:
                 # OBJ is 1-based
-                fh.write(f"f {f[0]+1} {f[1]+1} {f[2]+1}\n")
+                fh.write(f"f {f[0] + 1} {f[1] + 1} {f[2] + 1}\n")
 
     @staticmethod
     def _json_safe(obj: Any) -> Any:
@@ -281,23 +282,23 @@ class SurfaceFactory:
             raise FileNotFoundError(
                 f"Template mesh not found: {template_mesh_path!r}"
             )
-        self.root:               str = str(root)
+        self.root: str = str(root)
         self.template_mesh_path: str = str(template_mesh_path)
-        self._counter:           int = 0  # auto-incremented when no fname given
+        self._counter: int = 0  # auto-incremented when no fname given
 
     #  Surface generation 
 
     def generate_surface(
-        self,
-        handle_ids:       List[int],
-        target_positions: Union[np.ndarray, List],
-        roi_ids:          Optional[List[int]]  = None,
-        method:           str                  = "sre_arap",
-        alpha:            float                = 0.02,
-        max_iter:         int                  = 50,
-        signal_type:      Optional[str]        = None,
-        signal_params:    Optional[Dict[str, Any]] = None,
-        fname:            Optional[str]        = None,
+            self,
+            handle_ids: List[int],
+            target_positions: Union[np.ndarray, List],
+            roi_ids: Optional[List[int]] = None,
+            method: str = "sre_arap",
+            alpha: float = 0.02,
+            max_iter: int = 50,
+            signal_type: Optional[str] = None,
+            signal_params: Optional[Dict[str, Any]] = None,
+            fname: Optional[str] = None,
     ) -> Surface:
         """Generate a deformed surface and optionally attach a signal.
 
@@ -336,17 +337,22 @@ class SurfaceFactory:
         target_positions = np.asarray(target_positions, dtype=np.float64)
         if target_positions.ndim == 2:
             target_positions = target_positions.ravel()
-
+        # roi_ids =  [0,1,2,3,4,5,6,7,8,9,10,11]
+        # roi_ids = [i for i in range(1, 400)]
         roi = roi_ids if roi_ids is not None else []
-
+        # if len(roi) == 0:
+        #     # create list of id all
+        #     roi = [i+1 for i in range(250)]
+        print(">>>>  HANDLE LIST:  ", handle_ids)
+        print(">>>> ROI IDS:   ", roi_ids)
         V_new, F, deform_meta = _graphop.deform_surface(
-            mesh_path        = self.template_mesh_path,
-            handle_ids       = list(handle_ids),
-            target_positions = target_positions,
-            roi_ids          = list(roi),
-            method           = method,
-            alpha            = alpha,
-            max_iter         = max_iter,
+            mesh_path=self.template_mesh_path,
+            handle_ids=list(handle_ids),
+            target_positions=target_positions,
+            roi_ids=list(roi),
+            method=method,
+            alpha=alpha,
+            max_iter=max_iter,
         )
 
         #  File name ─
@@ -355,7 +361,7 @@ class SurfaceFactory:
             self._counter += 1
 
         #  Optional signal ─
-        signal:      Optional[np.ndarray]       = None
+        signal: Optional[np.ndarray] = None
         signal_meta: Optional[Dict[str, Any]] = None
 
         if signal_type is not None:
@@ -364,22 +370,22 @@ class SurfaceFactory:
             )
 
         return Surface(
-            vertices    = V_new,
-            faces       = F,
-            deform_meta = deform_meta,
-            root        = self.root,
-            fname       = fname,
-            signal      = signal,
-            signal_meta = signal_meta,
+            vertices=V_new,
+            faces=F,
+            deform_meta=deform_meta,
+            root=self.root,
+            fname=fname,
+            signal=signal,
+            signal_meta=signal_meta,
         )
 
     #  Signal helpers 
 
     def compute_signal(
-        self,
-        surface: Surface,
-        signal_type: str,
-        signal_params: Optional[Dict[str, Any]] = None,
+            self,
+            surface: Surface,
+            signal_type: str,
+            signal_params: Optional[Dict[str, Any]] = None,
     ) -> Surface:
         """Attach or replace the signal on an existing Surface.
 
@@ -402,10 +408,10 @@ class SurfaceFactory:
         return surface.update_signal(sig, meta)
 
     def _compute_signal(
-        self,
-        signal_type: str,
-        vertices: np.ndarray,
-        params: Dict[str, Any],
+            self,
+            signal_type: str,
+            vertices: np.ndarray,
+            params: Dict[str, Any],
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Internal signal dispatcher."""
         if signal_type == "isotropic":
@@ -418,9 +424,9 @@ class SurfaceFactory:
         )
 
     def _isotropic_signal(
-        self,
-        vertices: np.ndarray,
-        params: Dict[str, Any],
+            self,
+            vertices: np.ndarray,
+            params: Dict[str, Any],
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Evaluate an isotropic Gaussian signal.
 
@@ -428,23 +434,23 @@ class SurfaceFactory:
         sigma, amplitude (optional, default 1.0).
         """
         center = _resolve_center(vertices, params.get("center"))
-        sigma      = float(params.get("sigma",     0.1))
-        amplitude  = float(params.get("amplitude", 1.0))
+        sigma = float(params.get("sigma", 0.1))
+        amplitude = float(params.get("amplitude", 1.0))
 
         sig = isotropic_gaussian(vertices, center, sigma, amplitude)
 
         meta = {
-            "family":    "isotropic_gaussian",
-            "center":    center.tolist(),
-            "sigma":     sigma,
+            "family": "isotropic_gaussian",
+            "center": center.tolist(),
+            "sigma": sigma,
             "amplitude": amplitude,
         }
         return sig, meta
 
     def _anisotropic_signal(
-        self,
-        vertices: np.ndarray,
-        params: Dict[str, Any],
+            self,
+            vertices: np.ndarray,
+            params: Dict[str, Any],
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Evaluate an anisotropic Gaussian signal.
 
@@ -457,9 +463,9 @@ class SurfaceFactory:
             normal = _estimate_normal(vertices, center)
         normal = np.asarray(normal, dtype=float)
 
-        sigma_u           = float(params.get("sigma_u",           0.1))
-        sigma_v           = float(params.get("sigma_v",           0.05))
-        amplitude         = float(params.get("amplitude",         1.0))
+        sigma_u = float(params.get("sigma_u", 0.1))
+        sigma_v = float(params.get("sigma_v", 0.05))
+        amplitude = float(params.get("amplitude", 1.0))
         orientation_angle = float(params.get("orientation_angle", 0.0))
 
         sig = anisotropic_gaussian(
@@ -468,12 +474,12 @@ class SurfaceFactory:
         )
 
         meta = {
-            "family":            "anisotropic_gaussian",
-            "center":            center.tolist(),
-            "normal":            normal.tolist(),
-            "sigma_u":           sigma_u,
-            "sigma_v":           sigma_v,
-            "amplitude":         amplitude,
+            "family": "anisotropic_gaussian",
+            "center": center.tolist(),
+            "normal": normal.tolist(),
+            "sigma_u": sigma_u,
+            "sigma_v": sigma_v,
+            "amplitude": amplitude,
             "orientation_angle": orientation_angle,
         }
         return sig, meta

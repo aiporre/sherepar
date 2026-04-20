@@ -31,6 +31,7 @@ using Kernel    = CGAL::Simple_cartesian<double>;
 using Point_3   = Kernel::Point_3;
 using SurfMesh  = CGAL::Surface_mesh<Point_3>;
 using VD        = SurfMesh::Vertex_index;
+using vertex_iterator = SurfMesh::Vertex_iterator;
 
 // Deformation object instantiated for SRE_ARAP (the richest; we use the same
 // type and just ignore alpha when running plain ARAP).
@@ -164,9 +165,12 @@ run_deformation(
         throw std::runtime_error("Failed to load OBJ file: " + mesh_path);
 
     SurfMesh mesh = build_cgal_mesh(raw_verts, raw_faces);
+
+
     int nv = (int)mesh.num_vertices();
 
     //  index validaiton
+    std::cout << "handle_ids: " << handle_ids.size() << " handles, roi_ids: " << roi_ids.size() << " ROI vertices\n";
     for (int id : handle_ids)
         if (id < 0 || id >= nv)
             throw std::runtime_error("handle_id " + std::to_string(id) +
@@ -188,9 +192,14 @@ run_deformation(
 
     // Region of interest: full mesh if roi_ids is empty
     if (roi_ids.empty()) {
-        for (auto v : mesh.vertices())
-            deformer.insert_roi_vertex(v);
+        std::cout << "Using full mesh as ROI (" << nv << " vertices)\n";
+        vertex_iterator vb, ve;
+        std::tie(vb,ve) = vertices(mesh);
+        deformer.insert_roi_vertices(vb, ve);
+//        for (auto v : mesh.vertices())
+//            deformer.insert_roi_vertex(v);
     } else {
+        std::cout << "Using specified ROI with " << roi_ids.size() << " vertices\n";
         for (int id : roi_ids)
             deformer.insert_roi_vertex(VD(id));
     }
