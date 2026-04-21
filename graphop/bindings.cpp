@@ -61,16 +61,16 @@ static py::tuple pack_result(
     std::copy(faces_flat.begin(), faces_flat.end(), F.mutable_data());
 
     py::dict d;
-    d["template_mesh_path"]     = meta.template_mesh_path;
-    d["method"]                 = meta.method;
-    d["handle_ids"]             = meta.handle_ids;
-    d["target_positions"]       = meta.target_positions;
-    d["roi_ids"]                = meta.roi_ids;
-    d["alpha"]                  = meta.alpha;
-    d["max_iter"]               = meta.max_iter;
-    d["transform_center_ids"]   = meta.transform_center_ids;
-    d["transform_angles"]       = meta.transform_angles;
-    d["transform_ring_sizes"]   = meta.transform_ring_sizes;
+    d["template_mesh_path"]      = meta.template_mesh_path;
+    d["method"]                  = meta.method;
+    d["handle_ids"]              = meta.handle_ids;
+    d["target_positions"]        = meta.target_positions;
+    d["roi_ids"]                 = meta.roi_ids;
+    d["alpha"]                   = meta.alpha;
+    d["max_iter"]                = meta.max_iter;
+    d["transform_center_ids"]    = meta.transform_center_ids;
+    d["transform_angles"]        = meta.transform_angles;
+    d["transform_ring_sizes"]    = meta.transform_ring_sizes;
     d["transform_center_coords"] = meta.transform_center_coords;
 
     return py::make_tuple(V_new, F, d);
@@ -166,40 +166,11 @@ deform_surface(mesh_path, handle_ids, target_positions, ...)
 
 deform_surface_with_angles(mesh_path, handle_transforms, ...)
     Rotation interface: each handle specifies vertex_id, angle, ring_size.
-    Target positions are computed via Rodrigues rotation around the surface
-    normal at each center vertex.
 )doc";
 
     m.def(
         "deform_surface",
         &py_deform_surface,
-        R"doc(
-Deform a triangulated surface mesh loaded from an OBJ file.
-
-Parameters
-----------
-mesh_path : str
-    Path to the input OBJ mesh file.
-handle_ids : list[int]
-    0-based vertex indices used as positional handles (control points).
-target_positions : np.ndarray, shape (H, 3) or (3*H,)
-    Target 3-D positions for each handle vertex.
-roi_ids : list[int], optional
-    Region-of-interest vertex indices.  Empty list (default) = whole mesh.
-method : str, optional
-    Deformation algorithm: 'sre_arap' (default), 'original_arap',
-    'spokes_and_rims'.
-alpha : float, optional
-    SRE-ARAP smoothness weight (default 0.02; ignored for other methods).
-max_iter : int, optional
-    Maximum ARAP iterations (default 50).
-
-Returns
--------
-V_new : np.ndarray, shape (N, 3), dtype float64
-F     : np.ndarray, shape (M, 3), dtype int32
-meta  : dict
-)doc",
         py::arg("mesh_path"),
         py::arg("handle_ids"),
         py::arg("target_positions"),
@@ -211,49 +182,6 @@ meta  : dict
     m.def(
         "deform_surface_with_angles",
         &py_deform_surface_with_angles,
-        R"doc(
-Deform a surface using per-handle rotation specifications.
-
-Each handle is a dict with three required keys:
-    vertex_id  (int)   — 0-based index of the center vertex
-    angle      (float) — rotation angle in radians around the surface normal
-    ring_size  (float) — Euclidean radius; every vertex within this distance
-                         of the center vertex becomes a positional handle
-
-Optional key:
-    center_coords (list[float], len=3) — custom [x, y, z] rotation center.
-    If omitted, the center vertex position is used.
-
-The target position for each handle vertex v is:
-    target = center + Rodrigues(v - center, normal_at_center, angle)
-
-If multiple handle dicts affect the same vertex, the last one wins.
-
-Parameters
-----------
-mesh_path : str
-    Path to the input OBJ mesh file.
-handle_transforms : list[dict]
-    Per-handle specifications.  Each dict must have 'vertex_id', 'angle',
-    'ring_size', and may optionally include 'center_coords'.
-roi_ids : list[int], optional
-    Region-of-interest vertex indices.  Empty list (default) = whole mesh.
-method : str, optional
-    Deformation algorithm: 'sre_arap' (default), 'original_arap',
-    'spokes_and_rims'.
-alpha : float, optional
-    SRE-ARAP smoothness weight (default 0.02).
-max_iter : int, optional
-    Maximum ARAP iterations (default 50).
-
-Returns
--------
-V_new : np.ndarray, shape (N, 3), dtype float64
-F     : np.ndarray, shape (M, 3), dtype int32
-meta  : dict
-    Includes 'transform_center_ids', 'transform_angles', 'transform_ring_sizes',
-    and 'transform_center_coords' in addition to the standard deformation fields.
-)doc",
         py::arg("mesh_path"),
         py::arg("handle_transforms"),
         py::arg("roi_ids")  = std::vector<int>{},

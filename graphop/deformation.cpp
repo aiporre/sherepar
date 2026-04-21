@@ -412,9 +412,9 @@ run_deformation_with_angle(
         if (has_center_coords[i]) {
             centers.emplace_back(center_coords[3*i], center_coords[3*i+1], center_coords[3*i+2]);
         } else {
-            const Point_3& p = mesh.point(VD(handle_ids[i]));
-            // centers.emplace_back(p.x(), p.y(), p.z());
-            // put zeros
+            // No center_coords provided: use the origin as the rotation center.
+            // Rotations are applied as displacements relative to origin so that
+            // the deformer.rotate() call receives a consistent reference point.
             centers.emplace_back(0.0, 0.0, 0.0);
         }
     }

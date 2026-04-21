@@ -72,3 +72,30 @@ not found; `Surface` and the signal functions work independently.
 | `spherepar/benchmark/signals.py`   | Isotropic + anisotropic Gaussian signals     |
 | `examples/demo_stage1.py`          | End-to-end demo script                       |
 
+
+# some installation notes
+
+```bash
+# install CGAL and pybind11 (system package manager or conda)
+sudo apt install libcgal-dev libeigen3-dev
+pip install pybind11 trimesh scipy numpy=1.24
+```
+
+I am using `python=3.10` and `numpy=1.24` to avoid some compatibility issues with CGAL and pybind11.  Adjust as needed for your environment.
+1. install also `cmake` and `dev` tools for building the C++ extension.
+```bash
+(sherepar) sauron@mordor:sherepar$ cpp --version
+cpp (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0
+Copyright (C) 2021 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+(sherepar) sauron@mordor:sherepar$ cmake --version
+cmake version 3.22.1
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+```
+2. need also 'rtree'` for spatial queries in the deformation code.  Install via pip or conda:
+```bash
+# need also rtree
+pip install rtree
+```
