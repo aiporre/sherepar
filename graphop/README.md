@@ -26,9 +26,21 @@ sudo apt-get install -y \
 Or install Python packages via pip if preferred:
 
 ```bash
-pip install pybind11 numpy scipy trimesh
-```
+`pip install pybind11 numpy scipy trimesh
+````
 
+better conda coverage:
+
+```bash
+conda install -c conda-forge \
+    cgal \
+    eigen \
+    pybind11 \
+    numpy \
+    scipy \
+    cmake \
+    cxx-compiler
+```
 ---
 
 ## Build
