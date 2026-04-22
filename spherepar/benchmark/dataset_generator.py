@@ -522,8 +522,6 @@ def save_sample(
         root: str,
         name: str,
         mesh: trimesh.Trimesh,
-        patch_vertices: np.ndarray,
-        patch_indices: np.ndarray,
         stats: Dict[str, float],
         meta: Dict[str, Any],
 ) -> Dict[str, str]:
@@ -545,10 +543,6 @@ def save_sample(
         Base filename (without extension).
     mesh:
         Deformed, validated trimesh.Trimesh.
-    patch_vertices:
-        ROI patch vertex positions, shape (K, 3).
-    patch_indices:
-        ROI vertex indices into the deformed mesh, shape (K,).
     stats:
         Distance statistics dict.
     meta:
@@ -567,26 +561,19 @@ def save_sample(
         d.mkdir(parents=True, exist_ok=True)
 
     mesh_path = meshes_dir / f"{name}.obj"
-    patch_v_path = patches_dir / f"{name}_vertices.npy"
-    patch_i_path = patches_dir / f"{name}_indices.npy"
     labels_path = labels_dir / f"{name}.json"
 
     # Write OBJ
     mesh.export(str(mesh_path))
 
     # Write patch arrays
-    np.save(str(patch_v_path), patch_vertices)
-    np.save(str(patch_i_path), patch_indices)
 
     # Write JSON metadata
     label = {
         "name": name,
         "mesh_file": str(mesh_path),
-        "patch_vertices_file": str(patch_v_path),
-        "patch_indices_file": str(patch_i_path),
         "n_vertices": int(mesh.vertices.shape[0]),
         "n_faces": int(mesh.faces.shape[0]),
-        "n_patch_points": int(len(patch_indices)),
         "distance_stats": stats,
         "deformation": _json_safe(meta),
     }
@@ -595,8 +582,6 @@ def save_sample(
 
     return {
         "mesh": str(mesh_path),
-        "patch_vertices": str(patch_v_path),
-        "patch_indices": str(patch_i_path),
         "labels": str(labels_path),
     }
 
@@ -803,12 +788,12 @@ def generate_dataset(
                 total_failed += 1
                 continue
 
-            patch_center = np.mean(np.asarray(target_positions, dtype=np.float64), axis=0)
-
-            # ROI patch
-            patch_verts, patch_idxs = extract_roi_patch(
-                deformed.vertices, patch_center, patch_radius
-            )
+            # patch_center = np.mean(np.asarray(target_positions, dtype=np.float64), axis=0)
+            #
+            # # ROI patch
+            # patch_verts, patch_idxs = extract_roi_patch(
+            #     deformed.vertices, patch_center, patch_radius
+            # )
 
             # Distance statistics
             stats = compute_patch_to_mesh_stats(mesh.vertices, deformed)
@@ -831,8 +816,6 @@ def generate_dataset(
                 root=output_root,
                 name=sample_name,
                 mesh=deformed,
-                patch_vertices=patch_verts,
-                patch_indices=patch_idxs,
                 stats=stats,
                 meta=generation_meta,
             )
