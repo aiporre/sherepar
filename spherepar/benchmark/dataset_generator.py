@@ -45,6 +45,7 @@ generate_dataset(input_dir, output_root, ...)
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -55,6 +56,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import trimesh
 import trimesh.smoothing
+from pip._internal.resolution.resolvelib import candidates
 
 # ---------------------------------------------------------------------------
 # graphop import (lazy, so the module can be imported without the .so)
@@ -234,16 +236,70 @@ def sample_handle_centers(
     hi = cube_center + cube_half
     return rng.uniform(lo, hi, size=(n, 3))
 
+# ===========================================================================
+# 4a. Handle-vertices sampling
+# ===========================================================================
+
+def sample_handle_vertices(
+        mesh: trimesh.Trimesh,
+        n: int,
+        rng: Optional[np.random.Generator] = None,
+) -> Tuple[List[np.ndarray], List[int]]:
+    """Sample *n* candidate vertex to act as handle in the mesh.
+
+    Parameters
+    ----------
+    mesh:
+        Input mesh.
+    n:
+        Number of candidates to sample.
+    rng:
+        NumPy random generator; created with default seed if None.
+
+    Returns
+    -------
+    list of vertex positions, shape (n)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    num_vertices = len(mesh.vertices)
+    indices = rng.choice(num_vertices, size=n, replace=False)
+    return mesh.vertices[indices], indices
+
+
 
 # ===========================================================================
 # 5. Displacement constraint
 # ===========================================================================
 
+def rotation_euler(
+        vector: np.ndarray,
+        euler_angles_deviation: List[float]):
+    """ Rotation of vector with the euler angles deviation.
+
+    Parameters
+    ----------
+    vector:
+        Input vector to rotate, shape (3,).
+    euler_angles_deviation:
+        List of 3 Euler angle deviations (in radians) for rotation around x, y, z axes, respectively.
+
+    Returns
+    -------
+    np.ndarray, shape (3,)
+        Rotated vector.
+    """
+    euler_rotation_matrix = trimesh.transformations.euler_matrix(*euler_angles_deviation)[:3, :3]
+    return euler_rotation_matrix @ vector
+
+
+
 def compute_valid_displacement(
         center: np.ndarray,
         com: np.ndarray,
+        normal: np.ndarray,
         rng: Optional[np.random.Generator] = None,
-        max_ratio: float = 0.1,
+        max_ratio: Optional[float] = 0.1,
 ) -> np.ndarray:
     """Sample a displacement vector with magnitude ≤ max_ratio * dist(center, com).
 
@@ -253,6 +309,8 @@ def compute_valid_displacement(
         Deformation / handle center, shape (3,).
     com:
         Mesh center of mass, shape (3,).
+    normal:
+        Normal vector at the handle vertex, shape (3,).
     rng:
         NumPy random generator.
     max_ratio:
@@ -269,16 +327,21 @@ def compute_valid_displacement(
     max_mag = max_ratio * d
     if max_mag < 1e-12:
         return np.zeros(3)
-    # Sample direction uniformly on S^2 then scale by a random fraction
-    direction = rng.standard_normal(3)
+    # Sample direction uniformly on a solid cone pi/6 of S^2 then scale by a random fraction
+    euler_angles_deviation = rng.uniform(-math.pi/6, math.pi/6, 3)
+    direction = rotation_euler(normal, euler_angles_deviation)
+    # the direction can be inverted
+    flip_direction = rng.choice([1.0, -1.0])
+    print('..... flip direction', flip_direction)
+    direction = direction * flip_direction
     norm = np.linalg.norm(direction)
     if norm < 1e-12:
         direction = np.array([1.0, 0.0, 0.0])
     else:
         direction /= norm
     magnitude = rng.uniform(0.0, max_mag)
-    return direction * magnitude
-
+    displacement = direction * magnitude
+    return displacement
 
 # ===========================================================================
 # 6. ROI patch extraction
@@ -316,6 +379,7 @@ def extract_roi_patch(
     indices = np.array(tree.query_ball_point(center, radius), dtype=np.intp)
     if len(indices) == 0:
         # Fallback: nearest single vertex
+        print("Fallback no nearest in radius ", radius)
         _, idx = tree.query(center)
         indices = np.array([idx], dtype=np.intp)
     return vertices[indices], indices
@@ -327,7 +391,7 @@ def extract_roi_patch(
 
 def deform_mesh_with_graphop(
         mesh_path: str,
-        handle_id: int,
+        handle_id: int | List[int],
         target_pos: np.ndarray,
         roi_ids: Optional[List[int]] = None,
         method: str = "sre_arap",
@@ -359,10 +423,11 @@ def deform_mesh_with_graphop(
         raise ImportError(
             "graphop C++ extension is not available. Build it with CMake (see BUILD.md)."
         )
-    target = np.asarray(target_pos, dtype=np.float64).ravel()
+    handle_ids = [int(handle_id)] if isinstance(handle_id, (int, np.integer)) else [int(h) for h in handle_id]
+    target = np.asarray(target_pos, dtype=np.float64).reshape(-1)
     V_new, F, meta = _graphop.deform_surface(
         mesh_path=mesh_path,
-        handle_ids=[handle_id],
+        handle_ids=handle_ids,
         target_positions=target,
         roi_ids=list(roi_ids) if roi_ids is not None else [],
         method=method,
@@ -565,7 +630,7 @@ def append_error_log(log_path: str, name: str, reason: str) -> None:
 def generate_dataset(
         input_dir: str,
         output_root: str = "data/generated",
-        n_samples_per_mesh: int = 5,
+        n_samples_per_mesh: int = 25,
         patch_radius_ratio: float = 0.15,
         smoothing_iterations: int = 3,
         deform_method: str = "sre_arap",
@@ -600,6 +665,7 @@ def generate_dataset(
     repair_holes:
         Whether to attempt hole repair on meshes that are not watertight.
     """
+    global nearest_ids
     if not _GRAPHOP_AVAILABLE:
         raise ImportError(
             "graphop C++ extension is required. Build it with CMake (see BUILD.md)."
@@ -653,36 +719,77 @@ def generate_dataset(
             continue
 
         # --- Sample and deform ----------------------------------------------
-        candidates = sample_handle_centers(com, half_side, n_samples_per_mesh, rng)
+        # TODO: this will be used for deformation rotations
+        # candidates = sample_handle_centers(com, half_side, n_samples_per_mesh, rng)
+        GROUP_CANDIDATES = 5
+        handle_centers, candidates= sample_handle_vertices(mesh, n_samples_per_mesh, rng)
+        normals = mesh.vertex_normals[candidates]
+        # handle_centers = [mesh.vertices[i] for i in candidates]
+
         sample_idx = 0
+        number_vertices = len(mesh.vertices)
 
-        for i, handle_center in enumerate(candidates):
-            # Find the nearest vertex to use as the graphop handle
-            _, nearest_ids = extract_roi_patch(mesh.vertices, handle_center, 0.0)
-            handle_id = int(nearest_ids[0])
-            handle_pos = mesh.vertices[handle_id].copy()
+        for group_start in range(0, len(candidates), GROUP_CANDIDATES):
+            group_stop = min(group_start + GROUP_CANDIDATES, len(candidates))
+            group_handle_ids = [int(h) for h in candidates[group_start:group_stop]]
+            group_handle_centers = handle_centers[group_start:group_stop]
+            group_normals = normals[group_start:group_stop]
 
-            # Constrained displacement
-            displacement = compute_valid_displacement(handle_pos, com, rng)
-            target_pos = handle_pos + displacement
+            roi_union: set[int] = set()
+            target_positions: List[np.ndarray] = []
+            displacements: List[np.ndarray] = []
+            handle_positions: List[np.ndarray] = []
+
+            for handle_id, handle_center, normal in zip(group_handle_ids, group_handle_centers, group_normals):
+                print('normal', normal)
+                _, nearest_ids = extract_roi_patch(mesh.vertices, handle_center, 0.0)
+                for r in np.linspace(0.0, bbox_diag, num=100):
+                    _, nearest_ids = extract_roi_patch(mesh.vertices, handle_center, radius=r)
+                    if len(nearest_ids) > 0.3 * number_vertices:
+                        print(
+                            f"Found {len(nearest_ids)} nearest ids for the handle {handle_center} "
+                            f"which is the {100 * len(nearest_ids) / number_vertices:.2f}% of the handle center."
+                            f" Radius used: {r:.4f}")
+                        break
+
+                roi_union.update(int(idx) for idx in nearest_ids)
+
+                handle_pos = mesh.vertices[handle_id].copy()
+                displacement = compute_valid_displacement(handle_pos, com, normal, rng, max_ratio=0.8)
+                target_pos = handle_pos + displacement
+                # if mesh.contains([target_pos]):
+                #     print("Warning: target position is inside the mesh; deformation may fail or produce degenerate geometry.")
+                #     print("Inverting direction....")
+                #     displacement = -displacement
+                #     target_pos = handle_pos + displacement
+
+                print(" diplacement: ", displacement)
+                print(" target_pos: ", target_pos)
+                print(" handle_id: ", handle_id)
+
+                handle_positions.append(handle_pos)
+                displacements.append(displacement)
+                target_positions.append(target_pos)
+
+            if not roi_union:
+                append_error_log(log_path, mesh_name, "empty ROI for grouped deformation")
+                total_failed += 1
+                continue
 
             sample_name = f"{mesh_name}_s{sample_idx:04d}"
 
-            # Deform
             try:
                 V_new, F_new, deform_meta = deform_mesh_with_graphop(
                     mesh_path=tmp_path,
-                    handle_id=handle_id,
-                    target_pos=target_pos,
-                    roi_ids=None,
+                    handle_id=group_handle_ids,
+                    target_pos=np.asarray(target_positions, dtype=np.float64),
+                    roi_ids=sorted(roi_union),
                     method=deform_method,
                     alpha=alpha,
                     max_iter=max_iter,
                 )
             except Exception as exc:  # noqa: BLE001
-                append_error_log(
-                    log_path, sample_name, f"deformation failed: {exc}"
-                )
+                append_error_log(log_path, sample_name, f"deformation failed: {exc}")
                 total_failed += 1
                 continue
 
@@ -696,9 +803,11 @@ def generate_dataset(
                 total_failed += 1
                 continue
 
+            patch_center = np.mean(np.asarray(target_positions, dtype=np.float64), axis=0)
+
             # ROI patch
             patch_verts, patch_idxs = extract_roi_patch(
-                deformed.vertices, target_pos, patch_radius
+                deformed.vertices, patch_center, patch_radius
             )
 
             # Distance statistics
@@ -707,10 +816,10 @@ def generate_dataset(
             # Augment metadata
             generation_meta: Dict[str, Any] = {
                 "template_mesh": mesh_name,
-                "handle_id": handle_id,
-                "handle_original_pos": handle_pos.tolist(),
-                "displacement": displacement.tolist(),
-                "target_pos": target_pos.tolist(),
+                "handle_id": group_handle_ids,
+                "handle_original_pos": [pos.tolist() for pos in handle_positions],
+                "displacement": [disp.tolist() for disp in displacements],
+                "target_pos": [pos.tolist() for pos in target_positions],
                 "center_of_mass": com.tolist(),
                 "sampling_cube_half_side": float(half_side),
                 "patch_radius": float(patch_radius),
