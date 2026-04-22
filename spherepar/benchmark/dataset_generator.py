@@ -811,7 +811,7 @@ def generate_dataset(
             )
 
             # Distance statistics
-            stats = compute_patch_to_mesh_stats(patch_verts, deformed)
+            stats = compute_patch_to_mesh_stats(mesh.vertices, deformed)
 
             # Augment metadata
             generation_meta: Dict[str, Any] = {
