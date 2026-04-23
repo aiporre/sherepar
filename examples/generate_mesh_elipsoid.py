@@ -1,6 +1,7 @@
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from markdown_it.presets import default
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.spatial import SphericalVoronoi, geometric_slerp
 from scipy.spatial import Delaunay
@@ -162,6 +163,14 @@ def parse_args():
         default=400,
         help="Number of sampled surface points.",
     )
+    parser.add_argument(
+        "--file-name",
+        "--file_name",
+        default="ellipsoid.obj",
+        dest="file_name",
+        type=str,
+        help="File name of the ellipsoid file in ../data"
+    )
     return parser.parse_args()
 
 
@@ -184,7 +193,7 @@ def main():
 
     # Save to OBJ file
     print("\nSaving to OBJ file...")
-    save_to_obj("../data/ellipsoid.obj", vertices, faces)
+    save_to_obj(f"../data/{args.file_name}", vertices, faces)
 
     # Plot the mesh
     print("\nPlotting watertight ellipsoid...")

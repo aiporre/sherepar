@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 # Ensure the repo root is on the path so both graphop and spherepar are found
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,77 +40,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from spherepar.benchmark.dataset_generator import generate_dataset  # noqa: E402
+from spherepar.benchmark.dataset_generator import build_arg_parser
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Mesh-deformation dataset generator",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument(
-        "--input", "-i",
-        default=str(REPO_ROOT / "data"),
-        help="Directory containing input .obj meshes.",
-    )
-    p.add_argument(
-        "--output", "-o",
-        default=str(REPO_ROOT / "data" / "generated"),
-        help="Root output directory for generated dataset.",
-    )
-    p.add_argument(
-        "--n", "-n",
-        type=int,
-        default=5,
-        help="Number of deformation samples to attempt per input mesh.",
-    )
-    p.add_argument(
-        "--patch-radius-ratio",
-        type=float,
-        default=0.15,
-        help="ROI patch radius as a fraction of the bounding-box diagonal.",
-    )
-    p.add_argument(
-        "--smoothing-iter",
-        type=int,
-        default=3,
-        help="Number of Humphrey smoothing passes after deformation.",
-    )
-    p.add_argument(
-        "--method",
-        default="sre_arap",
-        choices=["sre_arap", "original_arap", "spokes_and_rims"],
-        help="Deformation algorithm.",
-    )
-    p.add_argument(
-        "--alpha",
-        type=float,
-        default=0.02,
-        help="SRE-ARAP smoothness weight.",
-    )
-    p.add_argument(
-        "--max-iter",
-        type=int,
-        default=50,
-        help="Maximum ARAP iterations.",
-    )
-    p.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility.",
-    )
-    p.add_argument(
-        "--no-repair",
-        action="store_true",
-        help="Skip hole-repair; meshes that are not watertight will be used as-is.",
-    )
-    return p.parse_args()
+def main(argv: Optional[List[str]]=None) -> None:
+    args = build_arg_parser().parse_args(argv)
 
-
-def main() -> None:
-    args = parse_args()
-
-    input_dir = Path(args.input)
+    input_dir = Path(args.input_dir)
     if not input_dir.is_dir():
         print(f"ERROR: input directory not found: {input_dir}")
         sys.exit(1)
@@ -118,25 +55,29 @@ def main() -> None:
     print("Mesh-deformation dataset generator")
     print("=" * 60)
     print(f"  Input     : {input_dir}")
-    print(f"  Output    : {args.output}")
-    print(f"  Samples/mesh: {args.n}")
-    print(f"  Method    : {args.method}")
+    print(f"  Output    : {args.output_root}")
+    print(f"  Samples/mesh: {args.n_samples_per_mesh}")
+    print(f"  Method    : {args.deform_method}")
     print(f"  Seed      : {args.seed}")
     print("=" * 60)
 
     generate_dataset(
-        input_dir=str(input_dir),
-        output_root=args.output,
-        n_samples_per_mesh=args.n,
+        input_dir=args.input_dir,
+        output_root=args.output_root,
+        n_samples_per_mesh=args.n_samples_per_mesh,
         patch_radius_ratio=args.patch_radius_ratio,
-        smoothing_iterations=args.smoothing_iter,
-        deform_method=args.method,
+        smoothing_iterations=args.smoothing_iterations,
+        group_candidates=args.group_candidates,
+        roi_vertex_ratio=args.roi_vertex_ratio,
+        max_ratio=args.max_ratio,
+        ring_size=args.ring_size,
+        deform_method=args.deform_method,
         alpha=args.alpha,
         max_iter=args.max_iter,
         seed=args.seed,
-        repair_holes=not args.no_repair,
+        repair_holes=not args.no_repair_holes,
+        drop_non_watertight=args.drop_non_watertight,
     )
-
 
 if __name__ == "__main__":
     main()

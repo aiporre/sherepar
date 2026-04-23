@@ -841,7 +841,8 @@ def generate_dataset(
                     max_iter=max_iter,
                 )
             except Exception as exc:  # noqa: BLE001
-                print(">>> ", exc)
+                # let's make it dangerously catch all exceptions.
+                print("Warning: check if a real error happened see log: ", exc)
                 append_error_log(log_path, sample_name, f"deformation failed: {exc}")
                 total_failed += 1
                 continue
