@@ -201,6 +201,14 @@ void test_meta_handle_ids_stored()
     EXPECT_EQ(meta.handle_ids, hids);
 }
 
+void test_meta_translate_ring_size_stored()
+{
+    auto [vf, ff, meta] = graphop::deform_surface(
+        ELLIPSOID_OBJ, {0}, {0,0,0}, {}, graphop::DeformMethod::SRE_ARAP, 0.02, 50, 0.25);
+
+    EXPECT_NEAR(meta.translate_ring_size, 0.25, 1e-12);
+}
+
 void test_zero_displacement_no_significant_change()
 {
     // Handles at their original positions — mesh should barely move
@@ -365,6 +373,7 @@ int main()
     RUN_TEST(test_original_arap_runs);
     RUN_TEST(test_spokes_and_rims_runs);
     RUN_TEST(test_meta_handle_ids_stored);
+    RUN_TEST(test_meta_translate_ring_size_stored);
     RUN_TEST(test_zero_displacement_no_significant_change);
 
     std::cout << "\n--- deform_surface_with_angles: error handling ---\n";

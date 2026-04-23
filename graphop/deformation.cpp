@@ -234,6 +234,7 @@ run_deformation(
     const std::string& mesh_path,
     const std::vector<int>& handle_ids,
     const std::vector<double>& target_positions,
+    double ring_size,
     const std::vector<int>& roi_ids,
     double alpha,
     int max_iter)
@@ -260,6 +261,8 @@ run_deformation(
 
     if ((int)target_positions.size() != (int)handle_ids.size() * 3)
         throw std::runtime_error("target_positions length must equal 3 * handle_ids.size()");
+    if (ring_size < 0.0)
+        throw std::runtime_error("ring_size must be non-negative");
 
     for (int id : roi_ids)
         if (id < 0 || id >= nv)
@@ -283,21 +286,29 @@ run_deformation(
             deformer.insert_roi_vertex(VD(id));
     }
 
-    // Control vertices (handles)
-    for (int id : handle_ids)
-        deformer.insert_control_vertex(VD(id));
+    // Control vertices (handles): translate a Euclidean ring around each handle.
+    std::vector<vertex_ring> rings;
+    rings.reserve(handle_ids.size());
+    for (int id : handle_ids) {
+        const auto ring = extract_euclidean_ring(mesh, VD(id), ring_size);
+        rings.push_back(ring);
+        for (auto v : ring)
+            deformer.insert_control_vertex(v);
+    }
 
     bool ok = deformer.preprocess();
     if (!ok)
         throw std::runtime_error("CGAL deformer preprocessing failed; "
                                  "check mesh validity and handle/ROI configuration.");
 
-    // Apply target positions
+    // Apply per-handle translations to each ring.
     for (int i = 0; i < (int)handle_ids.size(); ++i) {
-        Point_3 tgt(target_positions[3*i],
-                    target_positions[3*i+1],
-                    target_positions[3*i+2]);
-        deformer.set_target_position(VD(handle_ids[i]), tgt);
+        const Point_3& src = mesh.point(VD(handle_ids[i]));
+        const Eigen::Vector3d translation(
+            target_positions[3*i]   - src.x(),
+            target_positions[3*i+1] - src.y(),
+            target_positions[3*i+2] - src.z());
+        deformer.translate(rings[i].begin(), rings[i].end(), translation);
     }
 
     deformer.deform(static_cast<unsigned int>(max_iter), /*tolerance=*/1e-4);
@@ -317,6 +328,7 @@ run_deformation(
     meta.roi_ids             = roi_ids;
     meta.alpha               = alpha;
     meta.max_iter            = max_iter;
+    meta.translate_ring_size = ring_size;
 
     return {out_verts, out_faces, meta};
 }
@@ -513,18 +525,19 @@ deform_surface(
     const std::vector<int>& roi_ids,
     DeformMethod method,
     double alpha,
-    int max_iter)
+    int max_iter,
+    double ring_size)
 {
     switch (method) {
         case DeformMethod::ORIGINAL_ARAP:
             return run_deformation<CGAL::ORIGINAL_ARAP>(
-                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter);
+                mesh_path, handle_ids, target_positions, ring_size, roi_ids, alpha, max_iter);
         case DeformMethod::SPOKES_AND_RIMS:
             return run_deformation<CGAL::SPOKES_AND_RIMS>(
-                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter);
+                mesh_path, handle_ids, target_positions, ring_size, roi_ids, alpha, max_iter);
         case DeformMethod::SRE_ARAP:
             return run_deformation<CGAL::SRE_ARAP>(
-                mesh_path, handle_ids, target_positions, roi_ids, alpha, max_iter);
+                mesh_path, handle_ids, target_positions, ring_size, roi_ids, alpha, max_iter);
     }
     throw std::runtime_error("Unknown deformation method");
 }

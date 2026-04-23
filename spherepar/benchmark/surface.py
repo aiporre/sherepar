@@ -33,8 +33,10 @@ Both classes are designed so that two usage patterns feel natural:
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -46,9 +48,31 @@ from spherepar.benchmark.signals import isotropic_gaussian, anisotropic_gaussian
 # Lazy import of the C++ extension so the module can be imported even if the
 # extension has not been built yet (useful for documentation / IDE introspection).
 # ---------------------------------------------------------------------------
-try:
-    import graphop as _graphop  # compiled pybind11 extension
+def _load_graphop_extension():
+    """Load the compiled graphop extension from the repository root."""
+    repo_root = Path(__file__).resolve().parents[2]
+    for pattern in ("graphop*.so", "graphop*.pyd"):
+        for ext_path in sorted(repo_root.glob(pattern)):
+            sys.modules.pop("graphop", None)
+            spec = importlib.util.spec_from_file_location("graphop", ext_path)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if hasattr(module, "deform_surface"):
+                return module
 
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    import graphop as module  # type: ignore[import-not-found]
+
+    if not hasattr(module, "deform_surface"):
+        raise ImportError("Imported 'graphop' but did not find the compiled extension exports")
+    return module
+
+
+try:
+    _graphop = _load_graphop_extension()
     _GRAPHOP_AVAILABLE = True
 except ImportError:
     _graphop = None  # type: ignore[assignment]
@@ -292,6 +316,7 @@ class SurfaceFactory:
             self,
             handle_ids: List[int],
             target_positions: Union[np.ndarray, List],
+            ring_size: float = 0.0,
             roi_ids: Optional[List[int]] = None,
             method: str = "sre_arap",
             alpha: float = 0.02,
@@ -308,6 +333,10 @@ class SurfaceFactory:
             0-based vertex indices used as positional handles.
         target_positions:
             Target 3-D positions for each handle, shape (H, 3) or flat (3H,).
+        ring_size:
+            Euclidean radius around each handle. Every vertex within this
+            radius is translated by the same displacement as the handle.
+            ``0.0`` keeps the classic single-vertex handle behaviour.
         roi_ids:
             Optional region-of-interest vertex indices.  ``None`` = whole mesh.
         method:
@@ -344,6 +373,7 @@ class SurfaceFactory:
             mesh_path=self.template_mesh_path,
             handle_ids=list(handle_ids),
             target_positions=target_positions,
+            ring_size=ring_size,
             roi_ids=list(roi),
             method=method,
             alpha=alpha,

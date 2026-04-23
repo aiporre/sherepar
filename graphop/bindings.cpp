@@ -6,7 +6,8 @@
  * Exposes two functions to Python:
  *
  *   deform_surface(mesh_path, handle_ids, target_positions, ...)
- *       Classic interface: caller supplies raw target positions.
+ *       Classic interface: caller supplies raw target positions and an optional
+ *       translation ring size.
  *
  *   deform_surface_with_angles(mesh_path, handle_transforms, ...)
  *       Rotation interface: each handle specifies a center vertex, an angle,
@@ -68,6 +69,7 @@ static py::tuple pack_result(
     d["roi_ids"]                 = meta.roi_ids;
     d["alpha"]                   = meta.alpha;
     d["max_iter"]                = meta.max_iter;
+    d["translate_ring_size"]     = meta.translate_ring_size;
     d["transform_center_ids"]    = meta.transform_center_ids;
     d["transform_angles"]        = meta.transform_angles;
     d["transform_ring_sizes"]    = meta.transform_ring_sizes;
@@ -82,6 +84,7 @@ static py::tuple py_deform_surface(
     const std::string&       mesh_path,
     const std::vector<int>&  handle_ids,
     py::array_t<double>      target_positions_arr,
+    double                   ring_size,
     const std::vector<int>&  roi_ids,
     const std::string&       method_str,
     double alpha,
@@ -104,7 +107,7 @@ static py::tuple py_deform_surface(
     std::vector<double> tgt(data, data + handle_ids.size() * 3);
 
     auto [vf, ff, meta] = deform_surface(
-        mesh_path, handle_ids, tgt, roi_ids, parse_method(method_str), alpha, max_iter);
+        mesh_path, handle_ids, tgt, roi_ids, parse_method(method_str), alpha, max_iter, ring_size);
     return pack_result(vf, ff, meta);
 }
 
@@ -162,7 +165,8 @@ graphop — CGAL-based surface deformation backend for pmConv Stage 1.
 Functions
 ---------
 deform_surface(mesh_path, handle_ids, target_positions, ...)
-    Classic interface: deform using explicit target positions per handle.
+    Classic interface: deform using explicit target positions per handle and an
+    optional Euclidean ring translated together with each handle.
 
 deform_surface_with_angles(mesh_path, handle_transforms, ...)
     Rotation interface: each handle specifies vertex_id, angle, ring_size.
@@ -174,6 +178,7 @@ deform_surface_with_angles(mesh_path, handle_transforms, ...)
         py::arg("mesh_path"),
         py::arg("handle_ids"),
         py::arg("target_positions"),
+        py::arg("ring_size") = 0.0,
         py::arg("roi_ids")  = std::vector<int>{},
         py::arg("method")   = std::string("sre_arap"),
         py::arg("alpha")    = 0.02,

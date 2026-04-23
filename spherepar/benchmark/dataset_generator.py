@@ -40,10 +40,14 @@ compute_patch_to_mesh_stats(patch_points, mesh)
 save_sample(root, name, mesh, patch, stats, meta)
 append_error_log(log_path, name, reason)
 generate_dataset(input_dir, output_root, ...)
+build_arg_parser()
+main()
 """
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import math
 import os
@@ -61,11 +65,31 @@ from pip._internal.resolution.resolvelib import candidates
 # ---------------------------------------------------------------------------
 # graphop import (lazy, so the module can be imported without the .so)
 # ---------------------------------------------------------------------------
+def _load_graphop_extension():
+    """Load the compiled graphop extension from the repository root."""
+    repo_root = Path(__file__).resolve().parents[2]
+    for pattern in ("graphop*.so", "graphop*.pyd"):
+        for ext_path in sorted(repo_root.glob(pattern)):
+            sys.modules.pop("graphop", None)
+            spec = importlib.util.spec_from_file_location("graphop", ext_path)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if hasattr(module, "deform_surface"):
+                return module
+
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    import graphop as module  # type: ignore[import-not-found]
+
+    if not hasattr(module, "deform_surface"):
+        raise ImportError("Imported 'graphop' but did not find the compiled extension exports")
+    return module
+
+
 try:
-    _REPO_ROOT = Path(__file__).resolve().parents[2]
-    if str(_REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(_REPO_ROOT))
-    import graphop as _graphop
+    _graphop = _load_graphop_extension()
     _GRAPHOP_AVAILABLE = True
 except ImportError:
     _graphop = None  # type: ignore[assignment]
@@ -393,6 +417,7 @@ def deform_mesh_with_graphop(
         mesh_path: str,
         handle_id: int | List[int],
         target_pos: np.ndarray,
+        ring_size: float = 0.0,
         roi_ids: Optional[List[int]] = None,
         method: str = "sre_arap",
         alpha: float = 0.02,
@@ -408,6 +433,9 @@ def deform_mesh_with_graphop(
         0-based vertex index of the deformation handle.
     target_pos:
         Target position for the handle, shape (3,).
+    ring_size:
+        Euclidean radius around each handle. All vertices within this radius
+        are translated by the same displacement as the handle.
     roi_ids:
         Optional region-of-interest vertex indices (None = whole mesh).
     method, alpha, max_iter:
@@ -429,6 +457,7 @@ def deform_mesh_with_graphop(
         mesh_path=mesh_path,
         handle_ids=handle_ids,
         target_positions=target,
+        ring_size=ring_size,
         roi_ids=list(roi_ids) if roi_ids is not None else [],
         method=method,
         alpha=alpha,
@@ -445,7 +474,8 @@ def smooth_and_validate_mesh(
         vertices: np.ndarray,
         faces: np.ndarray,
         iterations: int = 3,
-) -> Optional[trimesh.Trimesh]:
+        drop_non_watertight: bool = False,
+) -> Tuple[Optional[trimesh.Trimesh], Dict[str, Any]]:
     """Apply Humphrey smoothing and validate the resulting mesh.
 
     Parameters
@@ -456,11 +486,14 @@ def smooth_and_validate_mesh(
         Face connectivity, shape (M, 3).
     iterations:
         Number of smoothing passes.
+    drop_non_watertight:
+        Whether to reject meshes that are not watertight.
 
     Returns
     -------
-    trimesh.Trimesh or None
-        Validated mesh, or None if invalid after smoothing.
+    (trimesh.Trimesh or None, dict)
+        Validated mesh, or None if invalid after smoothing, together with a
+        quality report containing degeneracy and watertightness checks.
     """
     mesh = trimesh.Trimesh(
         vertices=vertices,
@@ -468,18 +501,27 @@ def smooth_and_validate_mesh(
         process=False,
     )
     trimesh.smoothing.filter_humphrey(mesh, iterations=iterations)
-    # Remove degenerate and duplicate faces via boolean mask
+    areas = mesh.area_faces
+    degenerate_face_count = int(np.count_nonzero(areas <= 0.0))
+    quality = {"degenerate_face_count": degenerate_face_count}
+
+    if degenerate_face_count > 0:
+        quality["validation_error"] = "degenerate_faces"
+        return None, quality
+
+    # Remove duplicate / unreferenced geometry without hiding degeneracy.
     mask = mesh.nondegenerate_faces()
     mesh.update_faces(mask)
     mesh.remove_unreferenced_vertices()
+    quality["is_watertight"] = bool(mesh.is_watertight)
 
     if len(mesh.faces) == 0:
-        return None
-    # Check for degenerate / zero-area faces
-    areas = mesh.area_faces
-    if np.any(areas <= 0.0):
-        return None
-    return mesh
+        quality["validation_error"] = "no_faces"
+        return None, quality
+    if drop_non_watertight and not quality["is_watertight"]:
+        quality["validation_error"] = "non_watertight"
+        return None, quality
+    return mesh, quality
 
 
 # ===========================================================================
@@ -618,11 +660,16 @@ def generate_dataset(
         n_samples_per_mesh: int = 25,
         patch_radius_ratio: float = 0.15,
         smoothing_iterations: int = 3,
+        group_candidates: int = 5,
+        roi_vertex_ratio: float = 0.3,
+        max_ratio: float = 0.8,
+        ring_size: float = 0.0,
         deform_method: str = "sre_arap",
         alpha: float = 0.02,
         max_iter: int = 50,
         seed: int = 42,
         repair_holes: bool = True,
+        drop_non_watertight: bool = False,
 ) -> None:
     """Run the full dataset generation pipeline.
 
@@ -638,6 +685,15 @@ def generate_dataset(
         ROI patch radius as a fraction of the mesh bounding-box diagonal.
     smoothing_iterations:
         Humphrey smoothing passes applied after deformation.
+    group_candidates:
+        Number of sampled handle vertices grouped into each deformation call.
+    roi_vertex_ratio:
+        ROI-growth stop criterion expressed as a fraction of the mesh vertex
+        count.
+    max_ratio:
+        Maximum displacement as a fraction of dist(handle, center_of_mass).
+    ring_size:
+        Euclidean translation ring radius passed to graphop.deform_surface.
     deform_method:
         graphop deformation algorithm ('sre_arap', 'original_arap',
         'spokes_and_rims').
@@ -649,12 +705,23 @@ def generate_dataset(
         Random seed for reproducibility.
     repair_holes:
         Whether to attempt hole repair on meshes that are not watertight.
+    drop_non_watertight:
+        Whether to discard deformations that are not watertight after
+        smoothing/validation.
     """
     global nearest_ids
     if not _GRAPHOP_AVAILABLE:
         raise ImportError(
             "graphop C++ extension is required. Build it with CMake (see BUILD.md)."
         )
+    if group_candidates <= 0:
+        raise ValueError("group_candidates must be positive")
+    if not (0.0 < roi_vertex_ratio <= 1.0):
+        raise ValueError("roi_vertex_ratio must be in the interval (0, 1]")
+    if max_ratio < 0.0:
+        raise ValueError("max_ratio must be non-negative")
+    if ring_size < 0.0:
+        raise ValueError("ring_size must be non-negative")
 
     output_root = str(output_root)
     log_path = str(Path(output_root) / "logs" / "errors.log")
@@ -706,7 +773,6 @@ def generate_dataset(
         # --- Sample and deform ----------------------------------------------
         # TODO: this will be used for deformation rotations
         # candidates = sample_handle_centers(com, half_side, n_samples_per_mesh, rng)
-        GROUP_CANDIDATES = 5
         handle_centers, candidates= sample_handle_vertices(mesh, n_samples_per_mesh, rng)
         normals = mesh.vertex_normals[candidates]
         # handle_centers = [mesh.vertices[i] for i in candidates]
@@ -714,8 +780,8 @@ def generate_dataset(
         sample_idx = 0
         number_vertices = len(mesh.vertices)
 
-        for group_start in range(0, len(candidates), GROUP_CANDIDATES):
-            group_stop = min(group_start + GROUP_CANDIDATES, len(candidates))
+        for group_start in range(0, len(candidates), group_candidates):
+            group_stop = min(group_start + group_candidates, len(candidates))
             group_handle_ids = [int(h) for h in candidates[group_start:group_stop]]
             group_handle_centers = handle_centers[group_start:group_stop]
             group_normals = normals[group_start:group_stop]
@@ -730,7 +796,7 @@ def generate_dataset(
                 _, nearest_ids = extract_roi_patch(mesh.vertices, handle_center, 0.0)
                 for r in np.linspace(0.0, bbox_diag, num=100):
                     _, nearest_ids = extract_roi_patch(mesh.vertices, handle_center, radius=r)
-                    if len(nearest_ids) > 0.3 * number_vertices:
+                    if len(nearest_ids) > roi_vertex_ratio * number_vertices:
                         print(
                             f"Found {len(nearest_ids)} nearest ids for the handle {handle_center} "
                             f"which is the {100 * len(nearest_ids) / number_vertices:.2f}% of the handle center."
@@ -740,7 +806,7 @@ def generate_dataset(
                 roi_union.update(int(idx) for idx in nearest_ids)
 
                 handle_pos = mesh.vertices[handle_id].copy()
-                displacement = compute_valid_displacement(handle_pos, com, normal, rng, max_ratio=0.8)
+                displacement = compute_valid_displacement(handle_pos, com, normal, rng, max_ratio=max_ratio)
                 target_pos = handle_pos + displacement
                 # if mesh.contains([target_pos]):
                 #     print("Warning: target position is inside the mesh; deformation may fail or produce degenerate geometry.")
@@ -768,22 +834,36 @@ def generate_dataset(
                     mesh_path=tmp_path,
                     handle_id=group_handle_ids,
                     target_pos=np.asarray(target_positions, dtype=np.float64),
+                    ring_size=ring_size,
                     roi_ids=sorted(roi_union),
                     method=deform_method,
                     alpha=alpha,
                     max_iter=max_iter,
                 )
             except Exception as exc:  # noqa: BLE001
+                print(">>> ", exc)
                 append_error_log(log_path, sample_name, f"deformation failed: {exc}")
                 total_failed += 1
                 continue
 
             # Smooth + validate
-            deformed = smooth_and_validate_mesh(V_new, F_new, smoothing_iterations)
+            deformed, quality = smooth_and_validate_mesh(
+                V_new,
+                F_new,
+                smoothing_iterations,
+                drop_non_watertight=drop_non_watertight,
+            )
+            print(
+                f"    mesh quality: watertight={quality['is_watertight']} "
+                f"degenerate_faces={quality['degenerate_face_count']}"
+            )
             if deformed is None:
                 append_error_log(
                     log_path, sample_name,
-                    "mesh invalid after deformation/smoothing"
+                    "mesh invalid after deformation/smoothing "
+                    f"(watertight={quality['is_watertight']}, "
+                    f"degenerate_faces={quality['degenerate_face_count']}, "
+                    f"reason={quality.get('validation_error', 'unknown')})"
                 )
                 total_failed += 1
                 continue
@@ -808,6 +888,11 @@ def generate_dataset(
                 "center_of_mass": com.tolist(),
                 "sampling_cube_half_side": float(half_side),
                 "patch_radius": float(patch_radius),
+                "roi_vertex_ratio": float(roi_vertex_ratio),
+                "group_candidates": int(group_candidates),
+                "max_ratio": float(max_ratio),
+                "ring_size": float(ring_size),
+                "mesh_quality": _json_safe(quality),
                 "deform_meta": _json_safe(deform_meta),
             }
 
@@ -857,3 +942,62 @@ def _json_safe(obj: Any) -> Any:
     if isinstance(obj, np.floating):
         return float(obj)
     return obj
+
+
+# ===========================================================================
+# 13. CLI
+# ===========================================================================
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface for dataset generation."""
+    parser = argparse.ArgumentParser(
+        description="Generate a mesh deformation dataset with graphop and trimesh.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("input_dir", help="Directory containing input .obj meshes.")
+    parser.add_argument("--output-root", default="data/generated", help="Root directory for generated output.")
+    parser.add_argument("--n-samples-per-mesh", type=int, default=25, help="Number of deformation samples to attempt per input mesh.")
+    parser.add_argument("--patch-radius-ratio", type=float, default=0.15, help="Patch radius as a fraction of the mesh bounding-box diagonal.")
+    parser.add_argument("--smoothing-iterations", type=int, default=3, help="Number of Humphrey smoothing passes after deformation.")
+    parser.add_argument("--group-candidates", type=int, default=5, help="Number of sampled handle vertices grouped into each deformation call.")
+    parser.add_argument("--roi-vertex-ratio", type=float, default=0.3, help="ROI-growth stop criterion as a fraction of the mesh vertex count.")
+    parser.add_argument("--max-ratio", type=float, default=0.8, help="Maximum displacement magnitude as a fraction of dist(handle, center_of_mass).")
+    parser.add_argument("--ring-size", type=float, default=0.0, help="Euclidean translation ring radius passed to graphop.deform_surface.")
+    parser.add_argument(
+        "--deform-method",
+        choices=("sre_arap", "original_arap", "spokes_and_rims"),
+        default="sre_arap",
+        help="graphop deformation algorithm.",
+    )
+    parser.add_argument("--alpha", type=float, default=0.02, help="SRE-ARAP smoothness weight.")
+    parser.add_argument("--max-iter", type=int, default=50, help="Maximum ARAP iterations.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument("--no-repair-holes", action="store_true", help="Disable hole repair on non-watertight input meshes.")
+    parser.add_argument("--drop-non-watertight", action="store_true", help="Drop deformations that are not watertight after smoothing/validation.")
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """CLI entry point for dataset generation."""
+    args = build_arg_parser().parse_args(argv)
+    generate_dataset(
+        input_dir=args.input_dir,
+        output_root=args.output_root,
+        n_samples_per_mesh=args.n_samples_per_mesh,
+        patch_radius_ratio=args.patch_radius_ratio,
+        smoothing_iterations=args.smoothing_iterations,
+        group_candidates=args.group_candidates,
+        roi_vertex_ratio=args.roi_vertex_ratio,
+        max_ratio=args.max_ratio,
+        ring_size=args.ring_size,
+        deform_method=args.deform_method,
+        alpha=args.alpha,
+        max_iter=args.max_iter,
+        seed=args.seed,
+        repair_holes=not args.no_repair_holes,
+        drop_non_watertight=args.drop_non_watertight,
+    )
+
+
+if __name__ == "__main__":
+    main()

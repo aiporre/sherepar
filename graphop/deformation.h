@@ -58,6 +58,7 @@ struct DeformMeta {
     std::vector<int>    roi_ids;       ///< ROI vertex indices (empty = full mesh)
     double alpha;                      ///< SRE_ARAP smoothness weight
     int    max_iter;                   ///< Maximum deformation iterations
+    double translate_ring_size = 0.0;  ///< Euclidean ring radius used by deform_surface()
 
     // Fields set only by deform_surface_with_angles
     std::vector<int>    transform_center_ids;
@@ -77,6 +78,11 @@ struct DeformMeta {
  * @param method            Deformation algorithm to use (default: SRE_ARAP).
  * @param alpha             SRE_ARAP smoothness parameter (ignored for other methods).
  * @param max_iter          Maximum ARAP iterations.
+ * @param ring_size         Euclidean radius around each handle. Every mesh
+ *                          vertex whose distance from a handle vertex is
+ *                          <= ring_size is translated by the same displacement
+ *                          as that handle. A ring_size of 0 keeps the classic
+ *                          single-vertex-handle behaviour.
  *
  * @returns Tuple (vertices, faces, meta).
  * @throws std::runtime_error on any error.
@@ -89,7 +95,8 @@ deform_surface(
     const std::vector<int>& roi_ids = {},
     DeformMethod method = DeformMethod::SRE_ARAP,
     double alpha = 0.02,
-    int max_iter = 50
+    int max_iter = 50,
+    double ring_size = 0.0
 );
 
 /**
