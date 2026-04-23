@@ -14,15 +14,15 @@ Pipeline
    to the center of mass.
 5. Deform with the graphop CGAL backend.
 6. Smooth and validate the result.
-7. Extract a local ROI patch around the deformation center.
-8. Compute patch-to-mesh distance statistics (mean, std).
+7. Compute mesh-to-mesh distance statistics (mean, std).
+8. Generate a synthetic signal on the deformed surface.
 9. Save only valid samples; log all failures.
 
 Output layout (under a configurable root)::
 
     data/generated/
         meshes/     — deformed OBJ meshes
-        patches/    — ROI patch vertex positions (.npy)
+        signals/    — per-vertex signal arrays (.npy)
         labels/     — deformation parameters (.json)
         logs/       — per-run error log
 
@@ -37,7 +37,7 @@ extract_roi_patch(vertices, center, radius)
 deform_mesh_with_graphop(mesh_path, handle_id, target_pos, roi_ids)
 smooth_and_validate_mesh(mesh)
 compute_patch_to_mesh_stats(patch_points, mesh)
-save_sample(root, name, mesh, patch, stats, meta)
+save_sample(root, name, mesh, stats, meta)
 append_error_log(log_path, name, reason)
 generate_dataset(input_dir, output_root, ...)
 build_arg_parser()
@@ -60,7 +60,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import trimesh
 import trimesh.smoothing
-from pip._internal.resolution.resolvelib import candidates
+
+from spherepar.benchmark.surface import Surface, SurfaceFactory
+
 
 # ---------------------------------------------------------------------------
 # graphop import (lazy, so the module can be imported without the .so)
@@ -566,6 +568,11 @@ def save_sample(
         mesh: trimesh.Trimesh,
         stats: Dict[str, float],
         meta: Dict[str, Any],
+        signal_factory: Optional[SurfaceFactory] = None,
+        signal_type: Optional[str] = None,
+        signal_sigma: float = 0.2,
+        signal_amplitude: float = 1.0,
+        rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, str]:
     """Save a valid dataset sample to disk.
 
@@ -573,8 +580,7 @@ def save_sample(
 
         <root>/
           meshes/<name>.obj
-          patches/<name>_vertices.npy
-          patches/<name>_indices.npy
+          signals/<name>.npy
           labels/<name>.json
 
     Parameters
@@ -589,17 +595,27 @@ def save_sample(
         Distance statistics dict.
     meta:
         Deformation / generation metadata dict.
+    signal_factory:
+        Factory used to compute synthetic signals on the saved mesh.
+    signal_type:
+        Synthetic signal family. ``None`` disables signal generation.
+    signal_sigma:
+        Width parameter used for the generated signal.
+    signal_amplitude:
+        Amplitude used for the generated signal.
+    rng:
+        Random generator used to sample the signal center.
 
     Returns
     -------
-    dict mapping 'mesh', 'patch_vertices', 'patch_indices', 'labels'
-    to the paths of saved files.
+    dict mapping the saved output kinds to their file paths.
     """
     root_path = Path(root)
     meshes_dir = root_path / "meshes"
-    patches_dir = root_path / "patches"
     labels_dir = root_path / "labels"
-    for d in (meshes_dir, patches_dir, labels_dir):
+    signal_dir = root_path / "signals"
+
+    for d in (meshes_dir, labels_dir, signal_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     mesh_path = meshes_dir / f"{name}.obj"
@@ -608,12 +624,56 @@ def save_sample(
     # Write OBJ
     mesh.export(str(mesh_path))
 
-    # Write patch arrays
+    # Write signal arrays
+    # create a surface without signal
+    # create use signal factory maybe as dummy objec just to use methos pdate signal as create signals
+    signal_info: Dict[str, Any] = {}
+    signal_path: Optional[str] = None
+    if signal_type is not None:
+        if signal_factory is None:
+            raise ValueError("signal_factory is required when signal_type is not None")
+        if rng is None:
+            rng = np.random.default_rng()
+
+        signal_center_idx = int(rng.integers(0, len(mesh.vertices)))
+        if signal_type == "isotropic":
+            signal_params: Dict[str, Any] = {
+                "center": signal_center_idx,
+                "sigma": signal_sigma,
+                "amplitude": signal_amplitude,
+            }
+        else:
+            signal_params = {
+                "center": signal_center_idx,
+                "sigma_u": signal_sigma,
+                "sigma_v": max(signal_sigma * 0.5, 1e-6),
+                "amplitude": signal_amplitude,
+            }
+
+        surface = Surface(
+            vertices=np.asarray(mesh.vertices, dtype=np.float64),
+            faces=np.asarray(mesh.faces, dtype=np.int32),
+            deform_meta=_json_safe(meta.get("deform_meta", {})),
+            root=root,
+            fname=name,
+        )
+        surface = signal_factory.compute_signal(surface, signal_type, signal_params)
+        signal_paths = surface.save_only_signal()
+        signal_path = signal_paths["signal"]
+        signal_info = {
+            "signal_type": signal_type,
+            "signal_params": _json_safe(signal_params),
+            "signal_meta": _json_safe(surface.signal_meta),
+            "signal_file": signal_paths["signal"],
+            "signal_label_file": signal_paths["signal_label"],
+        }
+        meta["signal"] = signal_info
 
     # Write JSON metadata
     label = {
         "name": name,
         "mesh_file": str(mesh_path),
+        "signal_file": signal_path,
         "n_vertices": int(mesh.vertices.shape[0]),
         "n_faces": int(mesh.faces.shape[0]),
         "distance_stats": stats,
@@ -622,10 +682,13 @@ def save_sample(
     with open(labels_path, "w") as fh:
         json.dump(label, fh, indent=2)
 
-    return {
+    result = {
         "mesh": str(mesh_path),
         "labels": str(labels_path),
     }
+    if signal_path is not None:
+        result["signal"] = signal_path
+    return result
 
 
 # ===========================================================================
@@ -670,6 +733,9 @@ def generate_dataset(
         seed: int = 42,
         repair_holes: bool = True,
         drop_non_watertight: bool = False,
+        signal_type: Optional[str] = "isotropic",
+        signal_sigma: float = 0.2,
+        signal_amplitude: float = 1.0,
 ) -> None:
     """Run the full dataset generation pipeline.
 
@@ -708,6 +774,13 @@ def generate_dataset(
     drop_non_watertight:
         Whether to discard deformations that are not watertight after
         smoothing/validation.
+    signal_type:
+        Synthetic signal family attached after deformation. ``None`` disables
+        signal generation. The default is ``"isotropic"``.
+    signal_sigma:
+        Width parameter used for the default isotropic Gaussian signal.
+    signal_amplitude:
+        Amplitude used for the default isotropic Gaussian signal.
     """
     global nearest_ids
     if not _GRAPHOP_AVAILABLE:
@@ -722,11 +795,14 @@ def generate_dataset(
         raise ValueError("max_ratio must be non-negative")
     if ring_size < 0.0:
         raise ValueError("ring_size must be non-negative")
+    if signal_sigma <= 0.0:
+        raise ValueError("signal_sigma must be positive")
+    if signal_type not in (None, "isotropic", "anisotropic"):
+        raise ValueError("signal_type must be one of None, 'isotropic', or 'anisotropic'")
 
     output_root = str(output_root)
     log_path = str(Path(output_root) / "logs" / "errors.log")
     rng = np.random.default_rng(seed)
-
     # --- Load meshes --------------------------------------------------------
     print(f"Loading meshes from: {input_dir}")
     mesh_pairs = load_meshes_from_directory(input_dir)
@@ -769,6 +845,10 @@ def generate_dataset(
             os.unlink(tmp_path)
             total_failed += 1
             continue
+
+        signal_factory = None
+        if signal_type is not None:
+            signal_factory = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
 
         # --- Sample and deform ----------------------------------------------
         # TODO: this will be used for deformation rotations
@@ -896,7 +976,6 @@ def generate_dataset(
                 "mesh_quality": _json_safe(quality),
                 "deform_meta": _json_safe(deform_meta),
             }
-
             # Save
             paths = save_sample(
                 root=output_root,
@@ -904,6 +983,11 @@ def generate_dataset(
                 mesh=deformed,
                 stats=stats,
                 meta=generation_meta,
+                signal_factory=signal_factory,
+                signal_type=signal_type,
+                signal_sigma=signal_sigma,
+                signal_amplitude=signal_amplitude,
+                rng=rng,
             )
             print(
                 f"  [{sample_idx+1}/{n_samples_per_mesh}] saved → {paths['labels']} "
@@ -972,6 +1056,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--alpha", type=float, default=0.02, help="SRE-ARAP smoothness weight.")
     parser.add_argument("--max-iter", type=int, default=50, help="Maximum ARAP iterations.")
+    parser.add_argument(
+        "--signal-type",
+        choices=("isotropic", "anisotropic", "none"),
+        default="isotropic",
+        help="Synthetic signal family attached after deformation.",
+    )
+    parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter.")
+    parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no-repair-holes", action="store_true", help="Disable hole repair on non-watertight input meshes.")
     parser.add_argument("--drop-non-watertight", action="store_true", help="Drop deformations that are not watertight after smoothing/validation.")
@@ -981,6 +1073,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     """CLI entry point for dataset generation."""
     args = build_arg_parser().parse_args(argv)
+    signal_type = None if args.signal_type == "none" else args.signal_type
     generate_dataset(
         input_dir=args.input_dir,
         output_root=args.output_root,
@@ -994,6 +1087,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         deform_method=args.deform_method,
         alpha=args.alpha,
         max_iter=args.max_iter,
+        signal_type=signal_type,
+        signal_sigma=args.signal_sigma,
+        signal_amplitude=args.signal_amplitude,
         seed=args.seed,
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,

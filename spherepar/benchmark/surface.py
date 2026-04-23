@@ -234,6 +234,50 @@ class Surface:
             result["signal"] = str(signal_path)
         return result
 
+    def save_only_signal(self) -> Dict[str, str]:
+        """Save only the signal array and its metadata.
+
+        Directory layout::
+
+            <root>/
+              signals/<fname>.npy            — signal array
+              labels/<fname>_signal.json     — signal metadata
+
+        Returns
+        -------
+        dict
+            Paths of the files that were written, keyed by 'signal' and
+            'signal_label'.
+        """
+        if self.signal is None:
+            raise ValueError("Cannot save_only_signal() because no signal is attached to this Surface")
+
+        root = Path(self.root)
+        labels_dir = root / "labels"
+        signals_dir = root / "signals"
+
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        signals_dir.mkdir(parents=True, exist_ok=True)
+
+        signal_path = signals_dir / f"{self.fname}.npy"
+        signal_label_path = labels_dir / f"{self.fname}_signal.json"
+
+        np.save(signal_path, self.signal)
+
+        signal_metadata = {
+            "fname": self.fname,
+            "signal_file": str(signal_path),
+            "signal": self._json_safe(self.signal_meta) if self.signal_meta else None,
+            "n_vertices": int(self.vertices.shape[0]),
+        }
+        with open(signal_label_path, "w") as fh:
+            json.dump(signal_metadata, fh, indent=2)
+
+        return {
+            "signal": str(signal_path),
+            "signal_label": str(signal_label_path),
+        }
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _write_obj(self, path: Path) -> None:

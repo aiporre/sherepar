@@ -17,12 +17,12 @@ Usage
 See --help for the full list of options.
 
 The script reads every .obj from --input, runs the full pipeline
-(repair → deform → smooth → validate → patch → stats → save), and writes
+(repair → deform → smooth → validate → signal → stats → save), and writes
 results under --output::
 
     data/generated/
         meshes/   — deformed OBJ meshes
-        patches/  — ROI patch arrays (.npy)
+        signals/  — per-vertex signal arrays (.npy)
         labels/   — metadata JSON files
         logs/     — errors.log
 """
