@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -146,11 +147,35 @@ def plot_ellipsoid(vertices, faces):
     plt.show()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate a watertight ellipsoid mesh."
+    )
+    parser.add_argument("--a", type=float, default=2, help="Semi-axis length along x.")
+    parser.add_argument("--b", type=float, default=1.5, help="Semi-axis length along y.")
+    parser.add_argument("--c", type=float, default=1, help="Semi-axis length along z.")
+    parser.add_argument(
+        "--num-point",
+        "--num_points",
+        dest="num_point",
+        type=int,
+        default=400,
+        help="Number of sampled surface points.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     print("Generating random points on ellipsoid surface...")
 
     # Generate random points on ellipsoid
-    vertices = generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=400)
+    vertices = generate_random_ellipsoid_points(
+        a=args.a,
+        b=args.b,
+        c=args.c,
+        num_points=args.num_point,
+    )
     print(f"Generated {len(vertices)} random points")
 
     print("\nCreating watertight mesh using convex hull...")
