@@ -29,7 +29,6 @@ results under --output::
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -54,11 +53,25 @@ def main(argv: Optional[List[str]]=None) -> None:
     print("=" * 60)
     print("Mesh-deformation dataset generator")
     print("=" * 60)
-    print(f"  Input     : {input_dir}")
-    print(f"  Output    : {args.output_root}")
-    print(f"  Samples/mesh: {args.n_samples_per_mesh}")
-    print(f"  Method    : {args.deform_method}")
-    print(f"  Seed      : {args.seed}")
+    print(f"  Input             : {input_dir}")
+    print(f"  Output            : {args.output_root}")
+    print(f"  Samples/mesh      : {args.n_samples_per_mesh}")
+    print(f"  Patch radius ratio: {args.patch_radius_ratio}")
+    print(f"  Smoothing iters    : {args.smoothing_iterations}")
+    print(f"  Group candidates   : {args.group_candidates}")
+    print(f"  ROI vertex ratio   : {args.roi_vertex_ratio}")
+    print(f"  Max ratio          : {args.max_ratio}")
+    print(f"  Ring size          : {args.ring_size}")
+    print(f"  Method             : {args.deform_method}")
+    print(f"  Signal type        : {args.signal_type}")
+    print(f"  Signal sigma       : {args.signal_sigma}")
+    print(f"  Signal amplitude   : {args.signal_amplitude}")
+    print(f"  Signal centers     : {args.signal_num_centers}")
+    print(f"  Alpha              : {args.alpha}")
+    print(f"  Max iter           : {args.max_iter}")
+    print(f"  Seed               : {args.seed}")
+    print(f"  Repair holes       : {not args.no_repair_holes}")
+    print(f"  Drop non-watertight: {args.drop_non_watertight}")
     print("=" * 60)
 
     generate_dataset(
@@ -72,8 +85,12 @@ def main(argv: Optional[List[str]]=None) -> None:
         max_ratio=args.max_ratio,
         ring_size=args.ring_size,
         deform_method=args.deform_method,
+        signal_type=args.signal_type,
         alpha=args.alpha,
         max_iter=args.max_iter,
+        signal_sigma=args.signal_sigma,
+        signal_amplitude=args.signal_amplitude,
+        signal_num_centers=args.signal_num_centers,
         seed=args.seed,
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,

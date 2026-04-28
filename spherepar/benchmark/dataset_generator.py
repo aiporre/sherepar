@@ -572,6 +572,7 @@ def save_sample(
         signal_type: Optional[str] = None,
         signal_sigma: float = 0.2,
         signal_amplitude: float = 1.0,
+        signal_num_centers: int = 1,
         rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, str]:
     """Save a valid dataset sample to disk.
@@ -603,6 +604,8 @@ def save_sample(
         Width parameter used for the generated signal.
     signal_amplitude:
         Amplitude used for the generated signal.
+    signal_num_centers:
+        Number of centers used to generate the synthetic signal.
     rng:
         Random generator used to sample the signal center.
 
@@ -634,17 +637,20 @@ def save_sample(
             raise ValueError("signal_factory is required when signal_type is not None")
         if rng is None:
             rng = np.random.default_rng()
+        if signal_num_centers <= 0:
+            raise ValueError("signal_num_centers must be positive")
 
-        signal_center_idx = int(rng.integers(0, len(mesh.vertices)))
+        signal_center_idx = rng.integers(0, len(mesh.vertices), size=signal_num_centers)
+        signal_centers = [int(idx) for idx in np.atleast_1d(signal_center_idx)]
         if signal_type == "isotropic":
             signal_params: Dict[str, Any] = {
-                "center": signal_center_idx,
+                "centers": signal_centers,
                 "sigma": signal_sigma,
                 "amplitude": signal_amplitude,
             }
         else:
             signal_params = {
-                "center": signal_center_idx,
+                "center": signal_centers[0],
                 "sigma_u": signal_sigma,
                 "sigma_v": max(signal_sigma * 0.5, 1e-6),
                 "amplitude": signal_amplitude,
@@ -736,6 +742,7 @@ def generate_dataset(
         signal_type: Optional[str] = "isotropic",
         signal_sigma: float = 0.2,
         signal_amplitude: float = 1.0,
+        signal_num_centers: int = 1,
 ) -> None:
     """Run the full dataset generation pipeline.
 
@@ -781,6 +788,8 @@ def generate_dataset(
         Width parameter used for the default isotropic Gaussian signal.
     signal_amplitude:
         Amplitude used for the default isotropic Gaussian signal.
+    signal_num_centers:
+        Number of centers used for isotropic signal generation.
     """
     global nearest_ids
     if not _GRAPHOP_AVAILABLE:
@@ -797,6 +806,8 @@ def generate_dataset(
         raise ValueError("ring_size must be non-negative")
     if signal_sigma <= 0.0:
         raise ValueError("signal_sigma must be positive")
+    if signal_num_centers <= 0:
+        raise ValueError("signal_num_centers must be positive")
     if signal_type not in (None, "isotropic", "anisotropic"):
         raise ValueError("signal_type must be one of None, 'isotropic', or 'anisotropic'")
 
@@ -987,6 +998,7 @@ def generate_dataset(
                 signal_type=signal_type,
                 signal_sigma=signal_sigma,
                 signal_amplitude=signal_amplitude,
+                signal_num_centers=signal_num_centers,
                 rng=rng,
             )
             print(
@@ -1064,6 +1076,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter.")
     parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
+    parser.add_argument("--signal-num-centers", type=int, default=1, help="Number of centers used for isotropic signal generation.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no-repair-holes", action="store_true", help="Disable hole repair on non-watertight input meshes.")
     parser.add_argument("--drop-non-watertight", action="store_true", help="Drop deformations that are not watertight after smoothing/validation.")
@@ -1090,6 +1103,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         signal_type=signal_type,
         signal_sigma=args.signal_sigma,
         signal_amplitude=args.signal_amplitude,
+        signal_num_centers=args.signal_num_centers,
         seed=args.seed,
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,

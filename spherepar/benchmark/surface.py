@@ -588,18 +588,23 @@ class SurfaceFactory:
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Evaluate an isotropic Gaussian signal.
 
-        Expected keys in *params*: center (shape (3,) or vertex index int),
-        sigma, amplitude (optional, default 1.0).
+        Expected keys in *params*: center or centers (shape (3,), vertex index
+        int, or a list of either), sigma, amplitude (optional, default 1.0).
+        Multiple centers are combined additively.
         """
-        center = _resolve_center(vertices, params.get("center"))
+        centers = _resolve_centers(vertices, params.get("centers", params.get("center")))
         sigma = float(params.get("sigma", 0.1))
         amplitude = float(params.get("amplitude", 1.0))
 
-        sig = isotropic_gaussian(vertices, center, sigma, amplitude)
+        sig = np.zeros(vertices.shape[0], dtype=float)
+        for center in centers:
+            sig += isotropic_gaussian(vertices, center, sigma, amplitude)
 
         meta = {
             "family": "isotropic_gaussian",
-            "center": center.tolist(),
+            "center": centers[0].tolist(),
+            "centers": [center.tolist() for center in centers],
+            "num_centers": len(centers),
             "sigma": sigma,
             "amplitude": amplitude,
         }
@@ -667,6 +672,23 @@ def _resolve_center(vertices: np.ndarray,
     raise ValueError(
         f"center must be a 3-D point or a scalar vertex index, got shape {c.shape}"
     )
+
+
+def _resolve_centers(vertices: np.ndarray,
+                     centers: Any) -> List[np.ndarray]:
+    """Return one or more (3,) center points from points and/or vertex indices."""
+    if centers is None:
+        return [_resolve_center(vertices, None)]
+    if isinstance(centers, (list, tuple)):
+        if len(centers) == 0:
+            raise ValueError("centers must not be empty")
+        first = np.asarray(centers[0], dtype=float)
+        if first.ndim == 0 or first.shape == (3,):
+            return [_resolve_center(vertices, center) for center in centers]
+    arr = np.asarray(centers, dtype=float)
+    if arr.ndim == 2 and arr.shape[1] == 3:
+        return [center.copy() for center in arr]
+    return [_resolve_center(vertices, centers)]
 
 
 def _estimate_normal(vertices: np.ndarray, center: np.ndarray) -> np.ndarray:
