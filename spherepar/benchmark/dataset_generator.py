@@ -62,6 +62,7 @@ import trimesh
 import trimesh.smoothing
 
 from spherepar.benchmark.surface import Surface, SurfaceFactory
+from spherepar.spherical_parametrization import compute_spherical_parametrization
 
 
 # ---------------------------------------------------------------------------
@@ -105,15 +106,15 @@ except ImportError:
 def load_meshes_from_directory(
         directory: str,
 ) -> List[Tuple[str, trimesh.Trimesh]]:
-    """Load all .obj files from *directory*.
+    """Load mesh files from *directory* using trimesh.
 
-    Returns a list of (filename_stem, trimesh.Trimesh) pairs for every file
-    that loaded successfully and has at least one face.
+    Returns a list of (filename_stem, trimesh.Trimesh) pairs for files
+    that trimesh can load and that contain at least one face.
 
     Parameters
     ----------
     directory:
-        Path to a directory containing .obj files.
+        Path to a directory containing mesh files.
 
     Returns
     -------
@@ -122,9 +123,11 @@ def load_meshes_from_directory(
     directory = Path(directory)
     results: List[Tuple[str, trimesh.Trimesh]] = []
 
-    for obj_path in sorted(directory.glob("*.obj")):
+    for mesh_path in sorted(directory.iterdir()):
+        if not mesh_path.is_file():
+            continue
         try:
-            loaded = trimesh.load(str(obj_path), force="mesh")
+            loaded = trimesh.load(str(mesh_path), force="mesh")
             if isinstance(loaded, trimesh.Scene):
                 # merge all geometries into one
                 meshes = list(loaded.geometry.values())
@@ -135,7 +138,7 @@ def load_meshes_from_directory(
                 mesh = loaded
             if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
                 raise ValueError("No triangular faces found")
-            results.append((obj_path.stem, mesh))
+            results.append((mesh_path.stem, mesh))
         except Exception as exc:  # noqa: BLE001
             # Caller can choose to log these; we just skip silently here
             _ = exc
@@ -698,7 +701,61 @@ def save_sample(
 
 
 # ===========================================================================
-# 11. Error log
+# 11. Spherical parametrization save
+# ===========================================================================
+
+def save_spherical_parametrization(
+        root: str,
+        name: str,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        method: str = "flash",
+        cem_eps: float = 1e-6,
+        cem_max_iters: int = 100,
+        cem_verbose: bool = False,
+) -> Dict[str, str]:
+    """Compute and save spherical parametrization mesh and metadata label."""
+    root_path = Path(root)
+    spheres_dir = root_path / "spheres"
+    labels_dir = root_path / "labels"
+    spheres_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    sphere_vertices, sphere_meta = compute_spherical_parametrization(
+        vertices=vertices,
+        faces=faces,
+        method=method,
+        cem_eps=cem_eps,
+        cem_max_iters=cem_max_iters,
+        cem_verbose=cem_verbose,
+    )
+
+    sphere_mesh = trimesh.Trimesh(
+        vertices=sphere_vertices,
+        faces=np.asarray(faces, dtype=np.int32),
+        process=False,
+    )
+    sphere_path = spheres_dir / f"{name}.obj"
+    sphere_mesh.export(str(sphere_path))
+
+    sphere_label_path = labels_dir / f"{name}_spherical.json"
+    sphere_label = {
+        "name": name,
+        "method": method,
+        "sphere_file": str(sphere_path),
+        "metadata": _json_safe(sphere_meta),
+    }
+    with open(sphere_label_path, "w") as fh:
+        json.dump(sphere_label, fh, indent=2)
+
+    return {
+        "sphere": str(sphere_path),
+        "spherical_label": str(sphere_label_path),
+    }
+
+
+# ===========================================================================
+# 12. Error log
 # ===========================================================================
 
 def append_error_log(log_path: str, name: str, reason: str) -> None:
@@ -720,7 +777,7 @@ def append_error_log(log_path: str, name: str, reason: str) -> None:
 
 
 # ===========================================================================
-# 12. Top-level generator
+# 13. Top-level generator
 # ===========================================================================
 
 def generate_dataset(
@@ -743,6 +800,10 @@ def generate_dataset(
         signal_sigma: float = 0.2,
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
+        param_method: Optional[str] = None,
+        cem_eps: float = 1e-6,
+        cem_max_iters: int = 100,
+        cem_verbose: bool = False,
         offset_sample_counter: int = 0,
 
 ) -> int:
@@ -817,6 +878,8 @@ def generate_dataset(
         raise ValueError("signal_num_centers must be positive")
     if signal_type not in (None, "isotropic", "anisotropic"):
         raise ValueError("signal_type must be one of None, 'isotropic', or 'anisotropic'")
+    if param_method not in (None, "flash", "cem"):
+        raise ValueError("param_method must be one of None, 'flash', or 'cem'")
 
     output_root = str(output_root)
     log_path = str(Path(output_root) / "logs" / "errors.log")
@@ -1007,6 +1070,19 @@ def generate_dataset(
                 signal_num_centers=signal_num_centers,
                 rng=rng,
             )
+
+            if param_method is not None:
+                sphere_paths = save_spherical_parametrization(
+                    root=output_root,
+                    name=sample_name,
+                    vertices=np.asarray(deformed.vertices, dtype=np.float64),
+                    faces=np.asarray(deformed.faces, dtype=np.int32),
+                    method=param_method,
+                    cem_eps=cem_eps,
+                    cem_max_iters=cem_max_iters,
+                    cem_verbose=cem_verbose,
+                )
+                paths.update(sphere_paths)
             print(
                 f"  [{sample_idx+1}/{n_samples_per_mesh}] saved → {paths['labels']} "
                 f"(mean_dist={stats['mean_distance']:.4f}, "
@@ -1049,7 +1125,7 @@ def _json_safe(obj: Any) -> Any:
 
 
 # ===========================================================================
-# 13. CLI
+# 14. CLI
 # ===========================================================================
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1084,6 +1160,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter.")
     parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
     parser.add_argument("--signal-num-centers", type=int, default=1, help="Number of centers used for isotropic signal generation.")
+    parser.add_argument(
+        "--param-method",
+        choices=("flash", "cem", "none"),
+        default="none",
+        help="Spherical parametrization method saved under spheres/ and labels/*_spherical.json.",
+    )
+    parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence epsilon (if --param-method cem).")
+    parser.add_argument("--cem-max-iters", type=int, default=100, help="CEM max iterations (if --param-method cem).")
+    parser.add_argument("--cem-verbose", action="store_true", help="Enable CEM verbose logs (if --param-method cem).")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no-repair-holes", action="store_true", help="Disable hole repair on non-watertight input meshes.")
     parser.add_argument("--drop-non-watertight", action="store_true", help="Drop deformations that are not watertight after smoothing/validation.")
@@ -1094,6 +1179,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     """CLI entry point for dataset generation."""
     args = build_arg_parser().parse_args(argv)
     signal_type = None if args.signal_type == "none" else args.signal_type
+    param_method = None if args.param_method == "none" else args.param_method
     generate_dataset(
         input_dir=args.input_dir,
         output_root=args.output_root,
@@ -1111,6 +1197,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         signal_sigma=args.signal_sigma,
         signal_amplitude=args.signal_amplitude,
         signal_num_centers=args.signal_num_centers,
+        param_method=param_method,
+        cem_eps=args.cem_eps,
+        cem_max_iters=args.cem_max_iters,
+        cem_verbose=args.cem_verbose,
         seed=args.seed,
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,

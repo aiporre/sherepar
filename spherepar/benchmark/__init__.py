@@ -27,6 +27,7 @@ from spherepar.benchmark.dataset_generator import (
     smooth_and_validate_mesh,
     compute_patch_to_mesh_stats,
     save_sample,
+    save_spherical_parametrization,
     append_error_log,
     generate_dataset,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "smooth_and_validate_mesh",
     "compute_patch_to_mesh_stats",
     "save_sample",
+    "save_spherical_parametrization",
     "append_error_log",
     "generate_dataset",
 ]
