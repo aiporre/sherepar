@@ -743,7 +743,9 @@ def generate_dataset(
         signal_sigma: float = 0.2,
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
-) -> None:
+        offset_sample_counter: int = 0,
+
+) -> int:
     """Run the full dataset generation pipeline.
 
     Parameters
@@ -790,6 +792,11 @@ def generate_dataset(
         Amplitude used for the default isotropic Gaussian signal.
     signal_num_centers:
         Number of centers used for isotropic signal generation.
+    Returns
+    -----
+    total_saved: int
+        Number of samples successfully saved.
+    
     """
     global nearest_ids
     if not _GRAPHOP_AVAILABLE:
@@ -868,9 +875,8 @@ def generate_dataset(
         normals = mesh.vertex_normals[candidates]
         # handle_centers = [mesh.vertices[i] for i in candidates]
 
-        sample_idx = 0
+        sample_idx = 0 + offset_sample_counter if offset_sample_counter is not None else 0
         number_vertices = len(mesh.vertices)
-
         for group_start in range(0, len(candidates), group_candidates):
             group_stop = min(group_start + group_candidates, len(candidates))
             group_handle_ids = [int(h) for h in candidates[group_start:group_stop]]
@@ -1018,6 +1024,7 @@ def generate_dataset(
     print(f"\nDone. Saved: {total_saved} samples, Failed: {total_failed}")
     print(f"Error log  : {log_path}")
     print(f"Output root: {output_root}")
+    return total_saved
 
 
 # ===========================================================================
@@ -1107,6 +1114,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         seed=args.seed,
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,
+        offset_sample_counter=0,
     )
 
 

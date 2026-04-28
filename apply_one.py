@@ -10,7 +10,7 @@ import trimesh
 from matplotlib import pyplot as plt
 
 from spherepar.mesh import MeshFactory, plot_mesh
-from spherepar.parametrization import dirichlet_parametrization, stretch_parametrization
+from spherepar.cem_parametrization import dirichlet_parametrization, stretch_parametrization
 def main(mesh_path):
     # read mesh
     m = trimesh.load_mesh(mesh_path)

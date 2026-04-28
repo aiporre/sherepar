@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+examples/generate_dataset.py
+=============================
+
+Driver script for the mesh-deformation dataset generator.
+
+Usage
+-----
+    cd /path/to/spherepar
+    python examples/generate_dataset.py \\
+        --input  data/ \\
+        --output data/generated \\
+        --n      5 \\
+        --seed   42
+
+See --help for the full list of options.
+
+The script reads every .obj from --input, runs the full pipeline
+(repair → deform → smooth → validate → signal → stats → save), and writes
+results under --output::
+
+    data/generated/
+        meshes/   — deformed OBJ meshes
+        signals/  — per-vertex signal arrays (.npy)
+        labels/   — metadata JSON files
+        logs/     — errors.log
+        spheres/  — spheres result from the sphereical parametrization OBJ meshes with sphere coordinates.
+
+
+This script is used to generate the dataset cases:
+
+- Deforms and generate signals for each template on input directory
+    - Per-vertex signal arrays (.npy)
+    - Obj mesh file
+    - JSON file labels
+- For each generated mesh creates a spherical parametrization with FLASH or CEM
+- CASE 2 is small deformation controlled by small range of parameters:
+    - Max Ratio: used for displacement % from the point distance to the Center of Mass (CoM)
+    - Number of candidates: if larger more deformation points
+    - Group candidates: make the deformations more global, if use one one candidate, then the ROI is smaller. Grouping
+      will make the deformation more global, and thus the ROI larger.
+    - alpha: controls the deformation strength, if larger more deformation
+    - smooth-iterations: after each deformation the meshes are smooth out, this controls how many times the mesh
+      is smoothed after each deformation, if larger more smoothing and thus less deformation.
+- CASE 3 is large deformation controlled by a larger range of parameters, and thus more challenging for the
+  parametrization and convolution to learn.
+
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+from rich.console import group
+
+# Ensure the repo root is on the path so both graphop and spherepar are found
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from spherepar.benchmark.dataset_generator import generate_dataset  # noqa: E402
+from spherepar.benchmark.dataset_generator import build_arg_parser
+
+
+def main(argv: Optional[List[str]]=None) -> None:
+    args = build_arg_parser().parse_args(argv)
+
+    input_dir = Path(args.input_dir)
+    if not input_dir.is_dir():
+        print(f"ERROR: input directory not found: {input_dir}")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("Mesh-deformation dataset generator")
+    print("=" * 60)
+    print(f"  Input             : {input_dir}")
+    print(f"  Output            : {args.output_root}")
+    print(f"  Samples/mesh      : {args.n_samples_per_mesh}")
+    print(f"  Patch radius ratio: {args.patch_radius_ratio}")
+    print(f"  Smoothing iters    : {args.smoothing_iterations}")
+    print(f"  Group candidates   : {args.group_candidates}")
+    print(f"  ROI vertex ratio   : {args.roi_vertex_ratio}")
+    print(f"  Max ratio          : {args.max_ratio}")
+    print(f"  Ring size          : {args.ring_size}")
+    print(f"  Method             : {args.deform_method}")
+    print(f"  Signal type        : {args.signal_type}")
+    print(f"  Signal sigma       : {args.signal_sigma}")
+    print(f"  Signal amplitude   : {args.signal_amplitude}")
+    print(f"  Signal centers     : {args.signal_num_centers}")
+    print(f"  Alpha              : {args.alpha}")
+    print(f"  Max iter           : {args.max_iter}")
+    print(f"  Seed               : {args.seed}")
+    print(f"  Repair holes       : {not args.no_repair_holes}")
+    print(f"  Drop non-watertight: {args.drop_non_watertight}")
+    print("=" * 60)
+
+
+    # for now hard-coded
+    # ------
+    # generate 200 signal per center
+    offset_sample_counter = 0
+    for _ncenters in range(args.signal_num_centers):
+        num_samples = generate_dataset(
+            input_dir=args.input_dir,
+            output_root=args.output_root,
+            n_samples_per_mesh=args.n_samples_per_mesh,
+            patch_radius_ratio=args.patch_radius_ratio,
+            smoothing_iterations=args.smoothing_iterations,
+            group_candidates=args.group_candidates,
+            roi_vertex_ratio=args.roi_vertex_ratio,
+            max_ratio=args.max_ratio,
+            ring_size=args.ring_size,
+            deform_method=args.deform_method,
+            signal_type=args.signal_type,
+            alpha=args.alpha,
+            max_iter=args.max_iter,
+            signal_sigma=args.signal_sigma,
+            signal_amplitude=args.signal_amplitude,
+            signal_num_centers=args.signal_num_centers,
+            seed=args.seed,
+            repair_holes=not args.no_repair_holes,
+            drop_non_watertight=args.drop_non_watertight,
+            offset_sample_counter=offset_sample_counter
+        )
+        offset_sample_counter += num_samples
+
+
+    # TODO function to compute the spherecal parametrization for each generated mesh, and save it in the output directory
+    spherical_parametrization_method = args.param_method
+    for mesn in find_mesh(arg.output_root / "meshes"):
+        # this function used similar implemetnation as the examples to
+        compute_spherical_parametrization(mesn, method=spherical_parametrization_method, output_dir=args.output_root / "spheres")
+
+if __name__ == "__main__":
+    main()

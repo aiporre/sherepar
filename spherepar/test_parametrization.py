@@ -5,9 +5,9 @@ import numpy as np
 from skimage import measure
 from skimage.draw import ellipsoid
 from spherepar.mesh import *
-from spherepar.parametrization import (dirichlet_parametrization, stretch_parametrization,
-                                        _dirichlet_energy, _inverse_stereo_projection,
-                                        _EPS_INV)
+from spherepar.cem_parametrization import (dirichlet_parametrization, stretch_parametrization,
+                                           _dirichlet_energy, _inverse_stereo_projection,
+                                           _EPS_INV)
 
 
 class Test(TestCase):

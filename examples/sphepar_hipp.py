@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 
 # Import spherepar modules
 from spherepar.mesh import MeshFactory, plot_mesh
-from spherepar.parametrization import dirichlet_parametrization, stretch_parametrization
+from spherepar.cem_parametrization import dirichlet_parametrization, stretch_parametrization
 
 
 def load_mesh_from_file(mesh_path):
