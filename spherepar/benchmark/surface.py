@@ -589,24 +589,47 @@ class SurfaceFactory:
         """Evaluate an isotropic Gaussian signal.
 
         Expected keys in *params*: center or centers (shape (3,), vertex index
-        int, or a list of either), sigma, amplitude (optional, default 1.0).
+        int, or a list of either), sigma/sigmas, amplitude/amplitudes (optional, default 1.0).
         Multiple centers are combined additively.
+        Per-center sigma and amplitude can be provided as lists.
         """
         centers = _resolve_centers(vertices, params.get("centers", params.get("center")))
-        sigma = float(params.get("sigma", 0.1))
-        amplitude = float(params.get("amplitude", 1.0))
+        num_centers = len(centers)
+        
+        # Support both single values and per-center lists
+        sigma_list = params.get("sigmas", params.get("sigma"))
+        amplitude_list = params.get("amplitudes", params.get("amplitude"))
+        
+        # Convert to lists if needed
+        if not isinstance(sigma_list, (list, tuple)):
+            sigma_list = [float(sigma_list)] * num_centers
+        else:
+            sigma_list = [float(s) for s in sigma_list]
+        
+        if not isinstance(amplitude_list, (list, tuple)):
+            amplitude_list = [float(amplitude_list)] * num_centers
+        else:
+            amplitude_list = [float(a) for a in amplitude_list]
+        
+        # Ensure we have the right number of values
+        if len(sigma_list) != num_centers:
+            sigma_list = [sigma_list[0]] * num_centers if sigma_list else [0.1] * num_centers
+        if len(amplitude_list) != num_centers:
+            amplitude_list = [amplitude_list[0]] * num_centers if amplitude_list else [1.0] * num_centers
 
         sig = np.zeros(vertices.shape[0], dtype=float)
-        for center in centers:
-            sig += isotropic_gaussian(vertices, center, sigma, amplitude)
+        for i, center in enumerate(centers):
+            sig += isotropic_gaussian(vertices, center, sigma_list[i], amplitude_list[i])
 
         meta = {
             "family": "isotropic_gaussian",
             "center": centers[0].tolist(),
             "centers": [center.tolist() for center in centers],
             "num_centers": len(centers),
-            "sigma": sigma,
-            "amplitude": amplitude,
+            "sigma": sigma_list[0],  # Keep first for backward compat
+            "sigmas": sigma_list,
+            "amplitude": amplitude_list[0],  # Keep first for backward compat
+            "amplitudes": amplitude_list,
         }
         return sig, meta
 

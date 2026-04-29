@@ -53,6 +53,7 @@ import math
 import os
 import sys
 import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -63,6 +64,7 @@ import trimesh.smoothing
 
 from spherepar.benchmark.surface import Surface, SurfaceFactory
 from spherepar.spherical_parametrization import compute_spherical_parametrization
+from spherepar.benchmark.splits import build_task_splits, DEFAULT_TASKS
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,24 @@ try:
 except ImportError:
     _graphop = None  # type: ignore[assignment]
     _GRAPHOP_AVAILABLE = False
+
+
+DEFORMATION_CASES: Dict[str, Dict[str, Any]] = {
+    "case2_small": {
+        "max_ratio": (0.1, 0.3),
+        "num_candidates": (5, 10),
+        "group_candidates": (1, 5),
+        "alpha": (0.2, 0.6),
+        "smooth_iterations": (5, 15),
+    },
+    "case3_large": {
+        "max_ratio": (0.2, 0.4),
+        "num_candidates": (10, 15),
+        "group_candidates": (1, 5),
+        "alpha": (0.2, 0.6),
+        "smooth_iterations": (5, 15),
+    },
+}
 
 
 # ===========================================================================
@@ -458,6 +478,7 @@ def deform_mesh_with_graphop(
         )
     handle_ids = [int(handle_id)] if isinstance(handle_id, (int, np.integer)) else [int(h) for h in handle_id]
     target = np.asarray(target_pos, dtype=np.float64).reshape(-1)
+    # DEV-NOTE: graphop reads te mesh and deforms in memory. the output is vertices and faces
     V_new, F, meta = _graphop.deform_surface(
         mesh_path=mesh_path,
         handle_ids=handle_ids,
@@ -561,6 +582,91 @@ def compute_patch_to_mesh_stats(
     }
 
 
+def _ensure_dataset_dirs(root: str) -> Dict[str, Path]:
+    root_path = Path(root)
+    dirs = {
+        "meshes": root_path / "meshes",
+        "signals": root_path / "signals",
+        "spheres": root_path / "spheres",
+        "labels": root_path / "labels",
+        "folds": root_path / "folds",
+        "logs": root_path / "logs",
+    }
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+def _make_sample_id(sample_idx: int, template_name: Optional[str] = None) -> str:
+    """Generate sample ID, optionally including template name."""
+    if template_name:
+        # Sanitize template name to use only alphanumeric + underscores
+        safe_name = "".join(c if c.isalnum() or c == "_" else "_" for c in template_name)
+        return f"{safe_name}_s{sample_idx:06d}"
+    return f"sample_s{sample_idx:06d}"
+
+
+def _sample_deformation_config(case_name: str, rng: np.random.Generator) -> Dict[str, Any]:
+    if case_name not in DEFORMATION_CASES:
+        raise ValueError(f"Unknown deformation case {case_name!r}")
+    cfg = DEFORMATION_CASES[case_name]
+    return {
+        "deformation_case": case_name,
+        "max_ratio": float(rng.uniform(*cfg["max_ratio"])),
+        "num_candidates": int(rng.integers(cfg["num_candidates"][0], cfg["num_candidates"][1] + 1)),
+        "group_candidates": int(rng.choice(cfg["group_candidates"])),
+        "alpha": float(rng.uniform(*cfg["alpha"])),
+        "smooth_iterations": int(rng.integers(cfg["smooth_iterations"][0], cfg["smooth_iterations"][1] + 1)),
+    }
+
+
+def _randomize_signal_parameters(
+        sigma: float,
+        amplitude: float,
+        num_centers: int,
+        variation_percent: float = 20.0,
+        rng: Optional[np.random.Generator] = None,
+) -> Tuple[List[float], List[float]]:
+    """Randomize signal parameters (sigma, amplitude) by ±variation_percent.
+    
+    Parameters
+    ----------
+    sigma : float
+        Base sigma value.
+    amplitude : float
+        Base amplitude value.
+    num_centers : int
+        Number of centers (output list length).
+    variation_percent : float
+        Variation range as percentage (default 20%, means ±20%).
+    rng : np.random.Generator, optional
+        Random number generator. If None, uses default.
+    
+    Returns
+    -------
+    Tuple[List[float], List[float]]
+        (sigma_list, amplitude_list) with one value per center.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    # Convert percent to fraction
+    variation_frac = variation_percent / 100.0
+    
+    sigma_list = []
+    amplitude_list = []
+    
+    for _ in range(num_centers):
+        # Sample variation factor: (1 - variation_frac) to (1 + variation_frac)
+        sigma_factor = rng.uniform(1.0 - variation_frac, 1.0 + variation_frac)
+        amplitude_factor = rng.uniform(1.0 - variation_frac, 1.0 + variation_frac)
+        
+        sigma_list.append(float(sigma * sigma_factor))
+        amplitude_list.append(float(amplitude * amplitude_factor))
+    
+    return sigma_list, amplitude_list
+
+
 # ===========================================================================
 # 10. Save sample
 # ===========================================================================
@@ -571,11 +677,16 @@ def save_sample(
         mesh: trimesh.Trimesh,
         stats: Dict[str, float],
         meta: Dict[str, Any],
+        template_id: str,
+        deformation_case: str,
+        random_seed: int,
         signal_factory: Optional[SurfaceFactory] = None,
         signal_type: Optional[str] = None,
         signal_sigma: float = 0.2,
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
+        signal_sigma_values: Optional[List[float]] = None,
+        signal_amplitude_values: Optional[List[float]] = None,
         rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, str]:
     """Save a valid dataset sample to disk.
@@ -635,6 +746,10 @@ def save_sample(
     # create use signal factory maybe as dummy objec just to use methos pdate signal as create signals
     signal_info: Dict[str, Any] = {}
     signal_path: Optional[str] = None
+    signal_centers_coords: List[List[float]] = []
+    signal_center_ids: List[int] = []
+    sigmas: List[float] = []
+    amplitudes: List[float] = []
     if signal_type is not None:
         if signal_factory is None:
             raise ValueError("signal_factory is required when signal_type is not None")
@@ -645,18 +760,28 @@ def save_sample(
 
         signal_center_idx = rng.integers(0, len(mesh.vertices), size=signal_num_centers)
         signal_centers = [int(idx) for idx in np.atleast_1d(signal_center_idx)]
+        signal_centers_coords = [np.asarray(mesh.vertices[idx], dtype=float).tolist() for idx in signal_centers]
+        signal_center_ids = signal_centers
+        if signal_sigma_values is None:
+            sigmas = [float(signal_sigma)] * signal_num_centers
+        else:
+            sigmas = [float(v) for v in signal_sigma_values]
+        if signal_amplitude_values is None:
+            amplitudes = [float(signal_amplitude)] * signal_num_centers
+        else:
+            amplitudes = [float(v) for v in signal_amplitude_values]
         if signal_type == "isotropic":
             signal_params: Dict[str, Any] = {
                 "centers": signal_centers,
-                "sigma": signal_sigma,
-                "amplitude": signal_amplitude,
+                "sigmas": sigmas,  # Now pass the list of sigmas per center
+                "amplitudes": amplitudes,  # Pass per-center amplitudes
             }
         else:
             signal_params = {
                 "center": signal_centers[0],
-                "sigma_u": signal_sigma,
-                "sigma_v": max(signal_sigma * 0.5, 1e-6),
-                "amplitude": signal_amplitude,
+                "sigma_u": sigmas[0],  # Use the first randomized sigma
+                "sigma_v": max(sigmas[0] * 0.5, 1e-6),
+                "amplitude": amplitudes[0],  # Use the first randomized amplitude
             }
 
         surface = Surface(
@@ -675,18 +800,53 @@ def save_sample(
             "signal_meta": _json_safe(surface.signal_meta),
             "signal_file": signal_paths["signal"],
             "signal_label_file": signal_paths["signal_label"],
+            "num_centers": int(signal_num_centers),
+            "centers": signal_centers_coords,
+            "center_vertex_ids": signal_center_ids,
+            "sigmas": sigmas,
+            "amplitudes": amplitudes,
         }
         meta["signal"] = signal_info
 
     # Write JSON metadata
+    sphere_path = str(Path(root) / "spheres" / f"{name}.obj")
     label = {
+        "sample_id": name,
         "name": name,
+        "template_id": template_id,
+        "deformation_case": deformation_case,
         "mesh_file": str(mesh_path),
+        "mesh_path": str(mesh_path),
         "signal_file": signal_path,
+        "signal_path": signal_path,
+        "sphere_path": sphere_path,
+        "label_path": str(labels_path),
         "n_vertices": int(mesh.vertices.shape[0]),
         "n_faces": int(mesh.faces.shape[0]),
         "distance_stats": stats,
-        "deformation": _json_safe(meta),
+        "signal": {
+            "num_centers": int(signal_num_centers) if signal_type is not None else 0,
+            "centers": signal_centers_coords,
+            "center_vertex_ids": signal_center_ids,
+            "sigmas": sigmas,
+            "amplitudes": amplitudes,
+            "family": signal_type,
+        },
+        "deformation": _json_safe(meta.get("deformation", meta)),
+        "parametrization": {
+            "method": meta.get("parametrization_method"),
+            "success": False,
+        },
+        "random_seed": int(random_seed),
+        "warnings": _json_safe(meta.get("warnings", [])),
+    }
+    # task-facing metadata used by split builder
+    num_centers = int(label["signal"]["num_centers"])
+    label["tasks"] = {
+        "number_of_centers": {"valid": num_centers in [1, 2, 3, 4, 5], "label": num_centers},
+        "center_regression": {"valid": num_centers == 1, "label": label["signal"]["centers"][0] if num_centers == 1 else None},
+        "sigma_regression": {"valid": num_centers == 1, "label": label["signal"]["sigmas"][0] if num_centers == 1 else None},
+        "amplitude_regression": {"valid": num_centers == 1, "label": label["signal"]["amplitudes"][0] if num_centers == 1 else None},
     }
     with open(labels_path, "w") as fh:
         json.dump(label, fh, indent=2)
@@ -754,11 +914,95 @@ def save_spherical_parametrization(
     }
 
 
+def _update_sample_label(
+        label_path: str,
+        updates: Dict[str, Any],
+) -> None:
+    """ Insert data in the labels JSON files.
+
+    Parameters
+    ----------
+    label_path
+    updates
+
+    Returns
+    -------
+
+    """
+    with open(label_path, "r") as fh:
+        label = json.load(fh)
+    # shallow recursive-like merge for top-level keys and nested dicts
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(label.get(key), dict):
+            label[key].update(value)
+        else:
+            label[key] = value
+    with open(label_path, "w") as fh:
+        json.dump(label, fh, indent=2)
+
+
+def validate_saved_sample(
+        label_path: str,
+) -> Tuple[bool, List[str]]:
+    """Validate artifact integrity for a generated sample."""
+    issues: List[str] = []
+    p = Path(label_path)
+    if not p.exists():
+        return False, [f"missing label file: {label_path}"]
+    with open(p, "r") as fh:
+        label = json.load(fh)
+
+    required = [
+        "sample_id", "template_id", "deformation_case",
+        "mesh_path", "signal_path", "label_path",
+        "signal", "deformation", "parametrization", "random_seed",
+    ]
+    for key in required:
+        if key not in label:
+            issues.append(f"missing field in label: {key}")
+
+    mesh_path = Path(label.get("mesh_path", ""))
+    signal_path = Path(label.get("signal_path", "")) if label.get("signal_path") else None
+    sphere_path = Path(label.get("sphere_path", "")) if label.get("sphere_path") else None
+
+    if not mesh_path.exists():
+        issues.append(f"mesh file missing: {mesh_path}")
+    if signal_path is None or not signal_path.exists():
+        issues.append(f"signal file missing: {signal_path}")
+
+    if signal_path is not None and signal_path.exists():
+        signal = np.load(signal_path)
+        if np.isnan(signal).any():
+            issues.append("signal contains NaN")
+        if mesh_path.exists():
+            mesh = trimesh.load(str(mesh_path), force="mesh")
+            if isinstance(mesh, trimesh.Scene):
+                meshes = list(mesh.geometry.values())
+                mesh = trimesh.util.concatenate(meshes) if meshes else None
+            if mesh is None or not isinstance(mesh, trimesh.Trimesh):
+                issues.append("mesh file could not be loaded for validation")
+            elif len(signal) != len(mesh.vertices):
+                issues.append(f"signal length ({len(signal)}) != n_vertices ({len(mesh.vertices)})")
+
+    if bool(label.get("parametrization", {}).get("success")):
+        if sphere_path is None or not sphere_path.exists():
+            issues.append(f"sphere file missing despite parametrization success: {sphere_path}")
+
+    return len(issues) == 0, issues
+
+
 # ===========================================================================
 # 12. Error log
 # ===========================================================================
 
-def append_error_log(log_path: str, name: str, reason: str) -> None:
+def append_error_log(
+        log_path: str,
+        name: str,
+        reason: str,
+        template_id: Optional[str] = None,
+        deformation_case: Optional[str] = None,
+        traceback_text: Optional[str] = None,
+) -> None:
     """Append a failure entry to the error log file.
 
     Parameters
@@ -773,7 +1017,15 @@ def append_error_log(log_path: str, name: str, reason: str) -> None:
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(log_path, "a") as fh:
-        fh.write(f"{timestamp}  {name}  {reason}\n")
+        parts = [timestamp, name]
+        if template_id is not None:
+            parts.append(f"template={template_id}")
+        if deformation_case is not None:
+            parts.append(f"case={deformation_case}")
+        parts.append(reason)
+        fh.write("  ".join(parts) + "\n")
+        if traceback_text:
+            fh.write(traceback_text.rstrip() + "\n")
 
 
 # ===========================================================================
@@ -800,10 +1052,22 @@ def generate_dataset(
         signal_sigma: float = 0.2,
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
+        signal_centers_options: Optional[List[int]] = None,
+        signal_sigma_variation_percent: float = 20.0,
+        signal_amplitude_variation_percent: float = 20.0,
         param_method: Optional[str] = None,
         cem_eps: float = 1e-6,
         cem_max_iters: int = 100,
         cem_verbose: bool = False,
+        deformation_cases: Optional[List[str]] = None,
+        create_splits: bool = False,
+        split_tasks: Optional[List[str]] = None,
+        num_folds: int = 5,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+        test_ratio: float = 0.15,
+        split_seed: int = 0,
+        group_by_template: bool = True,
         offset_sample_counter: int = 0,
 
 ) -> int:
@@ -859,17 +1123,12 @@ def generate_dataset(
         Number of samples successfully saved.
     
     """
-    global nearest_ids
     if not _GRAPHOP_AVAILABLE:
         raise ImportError(
             "graphop C++ extension is required. Build it with CMake (see BUILD.md)."
         )
-    if group_candidates <= 0:
-        raise ValueError("group_candidates must be positive")
     if not (0.0 < roi_vertex_ratio <= 1.0):
         raise ValueError("roi_vertex_ratio must be in the interval (0, 1]")
-    if max_ratio < 0.0:
-        raise ValueError("max_ratio must be non-negative")
     if ring_size < 0.0:
         raise ValueError("ring_size must be non-negative")
     if signal_sigma <= 0.0:
@@ -878,10 +1137,18 @@ def generate_dataset(
         raise ValueError("signal_num_centers must be positive")
     if signal_type not in (None, "isotropic", "anisotropic"):
         raise ValueError("signal_type must be one of None, 'isotropic', or 'anisotropic'")
+    if signal_type is None:
+        raise ValueError("signal_type cannot be None for this dataset pipeline; each sample must include a signal.")
     if param_method not in (None, "flash", "cem"):
         raise ValueError("param_method must be one of None, 'flash', or 'cem'")
+    if deformation_cases is None:
+        deformation_cases = ["case2_small", "case3_large"]
+    for case_name in deformation_cases:
+        if case_name not in DEFORMATION_CASES:
+            raise ValueError(f"Unknown deformation case: {case_name}")
 
     output_root = str(output_root)
+    _ensure_dataset_dirs(output_root)
     log_path = str(Path(output_root) / "logs" / "errors.log")
     rng = np.random.default_rng(seed)
     # --- Load meshes --------------------------------------------------------
@@ -889,11 +1156,24 @@ def generate_dataset(
     mesh_pairs = load_meshes_from_directory(input_dir)
     if not mesh_pairs:
         print("No .obj files found or all failed to load.")
-        return
+        return 0
     print(f"  Loaded {len(mesh_pairs)} mesh(es)")
 
     total_saved = 0
     total_failed = 0
+
+    sample_idx = 0 + offset_sample_counter if offset_sample_counter is not None else 0
+
+    if signal_centers_options is None:
+        signal_centers_options = list(range(1, signal_num_centers + 1))
+    signal_centers_options = [int(v) for v in signal_centers_options if int(v) > 0]
+    if not signal_centers_options:
+        raise ValueError("signal_centers_options must contain at least one positive integer")
+    
+    # Fix sample count logic: n_samples_per_mesh is per center option
+    # Total samples = n_samples_per_mesh * len(signal_centers_options) * len(deformation_cases)
+    samples_per_center_and_case = n_samples_per_mesh
+    total_samples_plan = samples_per_center_and_case * len(signal_centers_options) * len(deformation_cases)
 
     for mesh_name, template_mesh in mesh_pairs:
         print(f"\nProcessing: {mesh_name}")
@@ -914,188 +1194,329 @@ def generate_dataset(
         ))
         patch_radius = patch_radius_ratio * bbox_diag
 
-        # We need a file on disk for the graphop backend
-        with tempfile.NamedTemporaryFile(
-                suffix=".obj", delete=False, mode="w"
-        ) as tmp:
-            tmp_path = tmp.name
-        try:
-            mesh.export(tmp_path)
-        except Exception as exc:  # noqa: BLE001
-            append_error_log(log_path, mesh_name, f"could not export temp OBJ: {exc}")
-            os.unlink(tmp_path)
-            total_failed += 1
-            continue
 
-        signal_factory = None
-        if signal_type is not None:
-            signal_factory = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
 
-        # --- Sample and deform ----------------------------------------------
-        # TODO: this will be used for deformation rotations
-        # candidates = sample_handle_centers(com, half_side, n_samples_per_mesh, rng)
-        handle_centers, candidates= sample_handle_vertices(mesh, n_samples_per_mesh, rng)
-        normals = mesh.vertex_normals[candidates]
-        # handle_centers = [mesh.vertices[i] for i in candidates]
-
-        sample_idx = 0 + offset_sample_counter if offset_sample_counter is not None else 0
         number_vertices = len(mesh.vertices)
-        for group_start in range(0, len(candidates), group_candidates):
-            group_stop = min(group_start + group_candidates, len(candidates))
-            group_handle_ids = [int(h) for h in candidates[group_start:group_stop]]
-            group_handle_centers = handle_centers[group_start:group_stop]
-            group_normals = normals[group_start:group_stop]
+        for case_name in deformation_cases:
+            for signal_num_centers_choice in signal_centers_options:
+                for _ in range(samples_per_center_and_case):
+                    sample_name = _make_sample_id(sample_idx, template_name=mesh_name)
+                    sample_idx += 1
+                    # TODO: this antipattern one seed only!!
+                    sample_seed = int(rng.integers(0, 2**31 - 1))
+                    sample_rng = np.random.default_rng(sample_seed)
+                    sampled_cfg = _sample_deformation_config(case_name, sample_rng)
 
-            roi_union: set[int] = set()
-            target_positions: List[np.ndarray] = []
-            displacements: List[np.ndarray] = []
-            handle_positions: List[np.ndarray] = []
+                    # the number of candidates means I will deform as many times the candidates says.
+                    num_candidates = min(int(sampled_cfg["num_candidates"]), number_vertices)
+                    candidate_ids = sample_rng.choice(number_vertices, size=num_candidates, replace=False)
+                    handle_ids = [int(v) for v in np.atleast_1d(candidate_ids)]
+                    
+                    # Apply group_candidates logic
+                    # If group_candidates is has a number>1 then we take additional candidate to make more deformations at the same times
+                    # it is basically deform on more directions
+                    n_group_candidates = sampled_cfg["group_candidates"]
+                    pool_grouped_candidates = {}
+                    if n_group_candidates > 1:
+                        # add to the pool random additional candidates to group with the main one
+                        for handle_id in handle_ids:
+                            pool_grouped_candidates[handle_id] = [handle_id] # add itself
+                            # generate new candites
+                            pool_grouped_candidates[handle_id].extend(
+                                int(v) for v in sample_rng.choice(
+                                    [idx for idx in range(number_vertices) if idx != handle_id],
+                                    size=n_group_candidates - 1,
+                                    replace=False,
+                                )
+                            )
+                            
+                    else:
+                        print("group_candidates is False, using only one handle per deformation. The list of extra candidates is empty")
+                        pool_grouped_candidates = {handle_id: [handle_id] for handle_id in handle_ids}
 
-            for handle_id, handle_center, normal in zip(group_handle_ids, group_handle_centers, group_normals):
-                print('normal', normal)
-                _, nearest_ids = extract_roi_patch(mesh.vertices, handle_center, 0.0)
-                for r in np.linspace(0.0, bbox_diag, num=100):
-                    _, nearest_ids = extract_roi_patch(mesh.vertices, handle_center, radius=r)
-                    if len(nearest_ids) > roi_vertex_ratio * number_vertices:
-                        print(
-                            f"Found {len(nearest_ids)} nearest ids for the handle {handle_center} "
-                            f"which is the {100 * len(nearest_ids) / number_vertices:.2f}% of the handle center."
-                            f" Radius used: {r:.4f}")
-                        break
+                    # for each candidate perform deformation with its group of candidates.
 
-                roi_union.update(int(idx) for idx in nearest_ids)
+                    # We need a file on disk for the graphop backend
+                    with tempfile.NamedTemporaryFile(
+                            suffix=".obj", delete=False, mode="w"
+                    ) as tmp:
+                        tmp_path = tmp.name
+                    try:
+                        mesh.export(tmp_path)
+                    except Exception as exc:  # noqa: BLE001
+                        append_error_log(log_path, mesh_name, f"could not export temp OBJ: {exc}")
+                        os.unlink(tmp_path)
+                        total_failed += 1
+                        continue
 
-                handle_pos = mesh.vertices[handle_id].copy()
-                displacement = compute_valid_displacement(handle_pos, com, normal, rng, max_ratio=max_ratio)
-                target_pos = handle_pos + displacement
-                # if mesh.contains([target_pos]):
-                #     print("Warning: target position is inside the mesh; deformation may fail or produce degenerate geometry.")
-                #     print("Inverting direction....")
-                #     displacement = -displacement
-                #     target_pos = handle_pos + displacement
 
-                print(" diplacement: ", displacement)
-                print(" target_pos: ", target_pos)
-                print(" handle_id: ", handle_id)
+                    deformed = mesh.copy() # Mesh is nice and smooth here, it will be deformed by each handle
+                    quality = None  # Track mesh quality across deformations
+                    deformation_failed = False  # Track if any deformation failed
 
-                handle_positions.append(handle_pos)
-                displacements.append(displacement)
-                target_positions.append(target_pos)
+                    for handle_id in handle_ids:
+                        # for each cadidate builds the rois and displacements
+                        roi_union: set[int] = set()
+                        target_positions: List[np.ndarray] = []
+                        displacements: List[np.ndarray] = []
+                        handle_positions: List[np.ndarray] = []
 
-            if not roi_union:
-                append_error_log(log_path, mesh_name, "empty ROI for grouped deformation")
-                total_failed += 1
-                continue
+                        handle_ids_in_group = pool_grouped_candidates[handle_id]
 
-            sample_name = f"{mesh_name}_s{sample_idx:04d}"
+                        for handle_id in handle_ids_in_group:
+                            handle_center = deformed.vertices[handle_id]
+                            normal = deformed.vertex_normals[handle_id]
+                            _, nearest_ids = extract_roi_patch(deformed.vertices, handle_center, 0.0)
+                            for r in np.linspace(0.0, bbox_diag, num=100):
+                                _, nearest_ids = extract_roi_patch(deformed.vertices, handle_center, radius=r)
+                                if len(nearest_ids) > roi_vertex_ratio * number_vertices:
+                                    print(f"Found {len(nearest_ids)} at handle_id={handle_id} which is {100 * len(nearest_ids) / number_vertices} % of vertices ")
+                                    print(f"Radius used: {r:.4f}")
+                                    break
 
-            try:
-                V_new, F_new, deform_meta = deform_mesh_with_graphop(
-                    mesh_path=tmp_path,
-                    handle_id=group_handle_ids,
-                    target_pos=np.asarray(target_positions, dtype=np.float64),
-                    ring_size=ring_size,
-                    roi_ids=sorted(roi_union),
-                    method=deform_method,
-                    alpha=alpha,
-                    max_iter=max_iter,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # let's make it dangerously catch all exceptions.
-                print("Warning: check if a real error happened see log: ", exc)
-                append_error_log(log_path, sample_name, f"deformation failed: {exc}")
-                total_failed += 1
-                continue
+                            roi_union.update(int(idx) for idx in nearest_ids)
+                            handle_pos = deformed.vertices[handle_id].copy()
+                            displacement = compute_valid_displacement(
+                                handle_pos,
+                                com,
+                                normal,
+                                sample_rng,
+                                max_ratio=sampled_cfg["max_ratio"],
+                            )
+                            target_positions.append(handle_pos + displacement)
+                            displacements.append(displacement)
+                            handle_positions.append(handle_pos)
 
-            # Smooth + validate
-            deformed, quality = smooth_and_validate_mesh(
-                V_new,
-                F_new,
-                smoothing_iterations,
-                drop_non_watertight=drop_non_watertight,
-            )
-            print(
-                f"    mesh quality: watertight={quality['is_watertight']} "
-                f"degenerate_faces={quality['degenerate_face_count']}"
-            )
-            if deformed is None:
-                append_error_log(
-                    log_path, sample_name,
-                    "mesh invalid after deformation/smoothing "
-                    f"(watertight={quality['is_watertight']}, "
-                    f"degenerate_faces={quality['degenerate_face_count']}, "
-                    f"reason={quality.get('validation_error', 'unknown')})"
-                )
-                total_failed += 1
-                continue
+                        if not roi_union:
+                            append_error_log(
+                                log_path,
+                                sample_name,
+                                "empty ROI for sampled deformation",
+                                template_id=mesh_name,
+                                deformation_case=case_name,
+                            )
+                            total_failed += 1
+                            deformation_failed = True
+                            break  # Stop deforming if ROI is empty
+                        # now deforms for this candidate
+                        try:
+                            V_new, F_new, deform_meta = deform_mesh_with_graphop(
+                                mesh_path=tmp_path,
+                                handle_id=handle_ids_in_group,
+                                target_pos=np.asarray(target_positions, dtype=np.float64),
+                                ring_size=ring_size,
+                                roi_ids=sorted(roi_union),
+                                method=deform_method,
+                                alpha=float(sampled_cfg["alpha"]),
+                                max_iter=max_iter,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            append_error_log(
+                                log_path,
+                                sample_name,
+                                f"deformation failed: {exc}",
+                                template_id=mesh_name,
+                                deformation_case=case_name,
+                                traceback_text=traceback.format_exc(),
+                            )
+                            total_failed += 1
+                            deformation_failed = True
+                            break  # Stop deforming if deformation fails
 
-            # patch_center = np.mean(np.asarray(target_positions, dtype=np.float64), axis=0)
-            #
-            # # ROI patch
-            # patch_verts, patch_idxs = extract_roi_patch(
-            #     deformed.vertices, patch_center, patch_radius
-            # )
+                        # Smooth + validate geometry
+                        # Gets a new mesh,
+                        deformed, quality = smooth_and_validate_mesh(
+                            V_new,
+                            F_new,
+                            int(sampled_cfg["smooth_iterations"]),
+                            drop_non_watertight=drop_non_watertight,
+                        )
 
-            # Distance statistics
-            stats = compute_patch_to_mesh_stats(mesh.vertices, deformed)
+                        if deformed is None:
+                            append_error_log(
+                                log_path,
+                                sample_name,
+                                "mesh invalid after deformation/smoothing "
+                                f"(watertight={quality.get('is_watertight')}, "
+                                f"degenerate_faces={quality.get('degenerate_face_count')}, "
+                                f"reason={quality.get('validation_error', 'unknown')})",
+                                template_id=mesh_name,
+                                deformation_case=case_name,
+                            )
+                            total_failed += 1
+                            deformation_failed = True
+                            break  # Stop deforming if mesh is invalid
 
-            # Augment metadata
-            generation_meta: Dict[str, Any] = {
-                "template_mesh": mesh_name,
-                "handle_id": group_handle_ids,
-                "handle_original_pos": [pos.tolist() for pos in handle_positions],
-                "displacement": [disp.tolist() for disp in displacements],
-                "target_pos": [pos.tolist() for pos in target_positions],
-                "center_of_mass": com.tolist(),
-                "sampling_cube_half_side": float(half_side),
-                "patch_radius": float(patch_radius),
-                "roi_vertex_ratio": float(roi_vertex_ratio),
-                "group_candidates": int(group_candidates),
-                "max_ratio": float(max_ratio),
-                "ring_size": float(ring_size),
-                "mesh_quality": _json_safe(quality),
-                "deform_meta": _json_safe(deform_meta),
-            }
-            # Save
-            paths = save_sample(
-                root=output_root,
-                name=sample_name,
-                mesh=deformed,
-                stats=stats,
-                meta=generation_meta,
-                signal_factory=signal_factory,
-                signal_type=signal_type,
-                signal_sigma=signal_sigma,
-                signal_amplitude=signal_amplitude,
-                signal_num_centers=signal_num_centers,
-                rng=rng,
-            )
+                        # save this mesh to continue deforming
+                        deformed.export(str(tmp_path))
 
-            if param_method is not None:
-                sphere_paths = save_spherical_parametrization(
-                    root=output_root,
-                    name=sample_name,
-                    vertices=np.asarray(deformed.vertices, dtype=np.float64),
-                    faces=np.asarray(deformed.faces, dtype=np.int32),
-                    method=param_method,
-                    cem_eps=cem_eps,
-                    cem_max_iters=cem_max_iters,
-                    cem_verbose=cem_verbose,
-                )
-                paths.update(sphere_paths)
-            print(
-                f"  [{sample_idx+1}/{n_samples_per_mesh}] saved → {paths['labels']} "
-                f"(mean_dist={stats['mean_distance']:.4f}, "
-                f"std_dist={stats['std_distance']:.4f})"
-            )
-            total_saved += 1
-            sample_idx += 1
+                    # Skip sample if deformation failed
+                    if deformation_failed or quality is None:
+                        os.unlink(tmp_path)
+                        continue
 
-        # Clean up temp file
+                    signal_factory = None
+                    if signal_type is not None:
+                        signal_factory = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
+                    stats = compute_patch_to_mesh_stats(mesh.vertices, deformed)
+                    sample_num_centers = signal_num_centers_choice
+
+                    # Randomize signal parameters
+                    sigma_list, amplitude_list = _randomize_signal_parameters(
+                        sigma=signal_sigma,
+                        amplitude=signal_amplitude,
+                        num_centers=sample_num_centers,
+                        variation_percent=signal_sigma_variation_percent,
+                        rng=sample_rng,
+                    )
+
+                    warnings: List[str] = []
+                    if signal_type == "anisotropic" and sample_num_centers != 1:
+                        warnings.append("anisotropic signal currently supports one center; forcing num_centers=1")
+                        sample_num_centers = 1
+                        sigma_list = [sigma_list[0]]
+                        amplitude_list = [amplitude_list[0]]
+                    generation_meta: Dict[str, Any] = {
+                        "deformation": {
+                            "max_ratio": float(sampled_cfg["max_ratio"]),
+                            "num_candidates": int(sampled_cfg["num_candidates"]),
+                            "group_candidates": bool(sampled_cfg["group_candidates"]),
+                            "alpha": float(sampled_cfg["alpha"]),
+                            "smooth_iterations": int(sampled_cfg["smooth_iterations"]),
+                            "ring_size": float(ring_size),
+                            "deform_method": deform_method,
+                            "max_iter": int(max_iter),
+                        },
+                        "template_mesh": mesh_name,
+                        "handle_id": handle_ids,
+                        "handle_original_pos": [pos.tolist() for pos in handle_positions],
+                        "displacement": [disp.tolist() for disp in displacements],
+                        "target_pos": [pos.tolist() for pos in target_positions],
+                        "center_of_mass": com.tolist(),
+                        "sampling_cube_half_side": float(half_side),
+                        "patch_radius": float(patch_radius),
+                        "roi_vertex_ratio": float(roi_vertex_ratio),
+                        "mesh_quality": _json_safe(quality),
+                        "deform_meta": _json_safe(deform_meta),
+                        "parametrization_method": param_method,
+                        "warnings": warnings,
+                    }
+
+                    try:
+                        paths = save_sample(
+                            root=output_root,
+                            name=sample_name,
+                            mesh=deformed,
+                            stats=stats,
+                            meta=generation_meta,
+                            template_id=mesh_name,
+                            deformation_case=case_name,
+                            random_seed=sample_seed,
+                            signal_factory=signal_factory,
+                            signal_type=signal_type,
+                            signal_sigma=signal_sigma,
+                            signal_amplitude=signal_amplitude,
+                            signal_num_centers=sample_num_centers,
+                            signal_sigma_values=sigma_list,
+                            signal_amplitude_values=amplitude_list,
+                            rng=sample_rng,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        append_error_log(
+                            log_path,
+                            sample_name,
+                            f"save_sample failed: {exc}",
+                            template_id=mesh_name,
+                            deformation_case=case_name,
+                            traceback_text=traceback.format_exc(),
+                        )
+                        total_failed += 1
+                        continue
+
+                    param_success = False
+                    param_error = None
+                    if param_method is not None:
+                        try:
+                            sphere_paths = save_spherical_parametrization(
+                                root=output_root,
+                                name=sample_name,
+                                vertices=np.asarray(deformed.vertices, dtype=np.float64),
+                                faces=np.asarray(deformed.faces, dtype=np.int32),
+                                method=param_method,
+                                cem_eps=cem_eps,
+                                cem_max_iters=cem_max_iters,
+                                cem_verbose=cem_verbose,
+                            )
+                            paths.update(sphere_paths)
+                            param_success = True
+                        except Exception as exc:  # noqa: BLE001
+                            param_error = str(exc)
+                            append_error_log(
+                                log_path,
+                                sample_name,
+                                f"spherical parametrization failed: {exc}",
+                                template_id=mesh_name,
+                                deformation_case=case_name,
+                                traceback_text=traceback.format_exc(),
+                            )
+
+                    _update_sample_label(
+                        paths["labels"],
+                        {
+                            "parametrization": {
+                                "method": param_method,
+                                "success": bool(param_success),
+                                "error": param_error,
+                            },
+                            "sphere_path": paths.get("sphere"),
+                        },
+                    )
+
+                    ok, issues = validate_saved_sample(paths["labels"])
+                    if not ok:
+                        append_error_log(
+                            log_path,
+                            sample_name,
+                            "validation failed: " + "; ".join(issues),
+                            template_id=mesh_name,
+                            deformation_case=case_name,
+                        )
+                        total_failed += 1
+                        continue
+
+                    print(
+                        f"  saved {sample_name} → {paths['labels']} "
+                        f"(mean_dist={stats['mean_distance']:.4f}, std_dist={stats['std_distance']:.4f})"
+                    )
+                    total_saved += 1
+
+                    # Clean up temp file
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
+
+    if create_splits:
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            build_task_splits(
+                dataset_root=output_root,
+                tasks=split_tasks if split_tasks is not None else DEFAULT_TASKS,
+                num_folds=num_folds,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+                seed=split_seed,
+                group_by_template=group_by_template,
+            )
+        except Exception as exc:  # noqa: BLE001
+            append_error_log(
+                log_path,
+                "split_builder",
+                f"split generation failed: {exc}",
+                traceback_text=traceback.format_exc(),
+            )
+            raise
 
     print(f"\nDone. Saved: {total_saved} samples, Failed: {total_failed}")
     print(f"Error log  : {log_path}")
@@ -1134,14 +1555,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Generate a mesh deformation dataset with graphop and trimesh.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("input_dir", help="Directory containing input .obj meshes.")
+    parser.add_argument("input_dir", help="Directory containing input mesh files.")
     parser.add_argument("--output-root", default="data/generated", help="Root directory for generated output.")
     parser.add_argument("--n-samples-per-mesh", type=int, default=25, help="Number of deformation samples to attempt per input mesh.")
     parser.add_argument("--patch-radius-ratio", type=float, default=0.15, help="Patch radius as a fraction of the mesh bounding-box diagonal.")
-    parser.add_argument("--smoothing-iterations", type=int, default=3, help="Number of Humphrey smoothing passes after deformation.")
-    parser.add_argument("--group-candidates", type=int, default=5, help="Number of sampled handle vertices grouped into each deformation call.")
+    parser.add_argument("--smoothing-iterations", type=int, default=3, help="Base smoothing passes (overridden by deformation case configuration).")
+    parser.add_argument("--group-candidates", type=int, default=5, help="Legacy parameter kept for backward compatibility.")
     parser.add_argument("--roi-vertex-ratio", type=float, default=0.3, help="ROI-growth stop criterion as a fraction of the mesh vertex count.")
-    parser.add_argument("--max-ratio", type=float, default=0.8, help="Maximum displacement magnitude as a fraction of dist(handle, center_of_mass).")
+    parser.add_argument("--max-ratio", type=float, default=0.8, help="Legacy parameter kept for backward compatibility.")
     parser.add_argument("--ring-size", type=float, default=0.0, help="Euclidean translation ring radius passed to graphop.deform_surface.")
     parser.add_argument(
         "--deform-method",
@@ -1153,13 +1574,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-iter", type=int, default=50, help="Maximum ARAP iterations.")
     parser.add_argument(
         "--signal-type",
-        choices=("isotropic", "anisotropic", "none"),
+        choices=("isotropic", "anisotropic"),
         default="isotropic",
         help="Synthetic signal family attached after deformation.",
     )
     parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter.")
     parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
-    parser.add_argument("--signal-num-centers", type=int, default=1, help="Number of centers used for isotropic signal generation.")
+    parser.add_argument("--signal-num-centers", type=int, default=1, help="Maximum number of signal centers (used when --signal-centers-options is not provided).")
+    parser.add_argument(
+        "--signal-centers-options",
+        type=str,
+        default=None,
+        help="Comma-separated center counts to sample per generated sample (e.g. '1,2,3,4,5').",
+    )
+    parser.add_argument(
+        "--signal-sigma-variation",
+        type=float,
+        default=20.0,
+        help="Variation range for sigma as percentage (default 20%%, means ±20%%).",
+    )
+    parser.add_argument(
+        "--signal-amplitude-variation",
+        type=float,
+        default=20.0,
+        help="Variation range for amplitude as percentage (default 20%%, means ±20%%).",
+    )
     parser.add_argument(
         "--param-method",
         choices=("flash", "cem", "none"),
@@ -1169,6 +1608,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence epsilon (if --param-method cem).")
     parser.add_argument("--cem-max-iters", type=int, default=100, help="CEM max iterations (if --param-method cem).")
     parser.add_argument("--cem-verbose", action="store_true", help="Enable CEM verbose logs (if --param-method cem).")
+    parser.add_argument(
+        "--deformation-cases",
+        type=str,
+        default="case2_small,case3_large",
+        help="Comma-separated deformation cases to generate (subset of: case2_small, case3_large).",
+    )
+    parser.add_argument("--create-splits", action="store_true", help="Build task-specific fold split files after generation.")
+    parser.add_argument("--num-folds", type=int, default=5, help="Number of folds to generate.")
+    parser.add_argument("--train-ratio", type=float, default=0.7, help="Training ratio used by split builder.")
+    parser.add_argument("--val-ratio", type=float, default=0.15, help="Validation ratio used by split builder.")
+    parser.add_argument("--test-ratio", type=float, default=0.15, help="Testing ratio used by split builder.")
+    parser.add_argument("--split-seed", type=int, default=0, help="Random seed used by split builder.")
+    parser.add_argument("--group-by-template", dest="group_by_template", action="store_true", default=True, help="Keep samples from same template in same fold (default true).")
+    parser.add_argument("--no-group-by-template", dest="group_by_template", action="store_false", help="Allow fold assignment at sample level.")
+    parser.add_argument(
+        "--split-tasks",
+        type=str,
+        default="number_of_centers,center_regression,sigma_regression,amplitude_regression",
+        help="Comma-separated task names to build splits for.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no-repair-holes", action="store_true", help="Disable hole repair on non-watertight input meshes.")
     parser.add_argument("--drop-non-watertight", action="store_true", help="Drop deformations that are not watertight after smoothing/validation.")
@@ -1178,8 +1637,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     """CLI entry point for dataset generation."""
     args = build_arg_parser().parse_args(argv)
-    signal_type = None if args.signal_type == "none" else args.signal_type
+    signal_type = args.signal_type
     param_method = None if args.param_method == "none" else args.param_method
+    signal_centers_options = None
+    if args.signal_centers_options:
+        signal_centers_options = [int(x.strip()) for x in args.signal_centers_options.split(",") if x.strip()]
+    deformation_cases = [x.strip() for x in args.deformation_cases.split(",") if x.strip()]
+    split_tasks = [x.strip() for x in args.split_tasks.split(",") if x.strip()]
     generate_dataset(
         input_dir=args.input_dir,
         output_root=args.output_root,
@@ -1197,10 +1661,22 @@ def main(argv: Optional[List[str]] = None) -> None:
         signal_sigma=args.signal_sigma,
         signal_amplitude=args.signal_amplitude,
         signal_num_centers=args.signal_num_centers,
+        signal_centers_options=signal_centers_options,
+        signal_sigma_variation_percent=args.signal_sigma_variation,
+        signal_amplitude_variation_percent=args.signal_amplitude_variation,
         param_method=param_method,
         cem_eps=args.cem_eps,
         cem_max_iters=args.cem_max_iters,
         cem_verbose=args.cem_verbose,
+        deformation_cases=deformation_cases,
+        create_splits=args.create_splits,
+        split_tasks=split_tasks,
+        num_folds=args.num_folds,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        split_seed=args.split_seed,
+        group_by_template=args.group_by_template,
         seed=args.seed,
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,

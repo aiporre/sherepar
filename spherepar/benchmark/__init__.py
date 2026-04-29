@@ -28,8 +28,16 @@ from spherepar.benchmark.dataset_generator import (
     compute_patch_to_mesh_stats,
     save_sample,
     save_spherical_parametrization,
+    validate_saved_sample,
     append_error_log,
     generate_dataset,
+)
+from spherepar.benchmark.splits import (
+    build_task_splits,
+    is_valid_for_number_of_centers,
+    is_valid_for_center_regression,
+    is_valid_for_sigma_regression,
+    is_valid_for_amplitude_regression,
 )
 
 __all__ = [
@@ -49,6 +57,12 @@ __all__ = [
     "compute_patch_to_mesh_stats",
     "save_sample",
     "save_spherical_parametrization",
+    "validate_saved_sample",
     "append_error_log",
     "generate_dataset",
+    "build_task_splits",
+    "is_valid_for_number_of_centers",
+    "is_valid_for_center_regression",
+    "is_valid_for_sigma_regression",
+    "is_valid_for_amplitude_regression",
 ]
