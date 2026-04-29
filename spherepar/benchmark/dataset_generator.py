@@ -102,6 +102,16 @@ except ImportError:
 
 
 DEFORMATION_CASES: Dict[str, Dict[str, Any]] = {
+    "case1_no": {
+        # No deformation - only signals are generated on original mesh
+        # Parametrization method is forced to None for this case
+        "max_ratio": (0.0, 0.0),
+        "num_candidates": (0, 0),
+        "group_candidates": (1, 1),
+        "alpha": (0.0, 0.0),
+        "smooth_iterations": (0, 0),
+        "ring_size": (0, 0),
+    },
     "case2_small": {
         "max_ratio": (0.1, 0.3),
         "num_candidates": (5, 10),
@@ -1203,163 +1213,194 @@ def generate_dataset(
         number_vertices = len(mesh.vertices)
         for case_name in deformation_cases:
             for signal_num_centers_choice in signal_centers_options:
+
                 for _ in range(samples_per_center_and_case):
+                    if case_name == "case1_no":
+                        # No deformation case: use original mesh and only generate signals
+                        deformed = mesh.copy()
+                        quality = {"is_watertight": True}  # Original mesh is always valid
+                        deformation_failed = False
+                        tmp_path = None
+                        handle_ids = []
+                        handle_positions = []
+                        displacements = []
+                        target_positions = []
+                        deform_meta = {}
+                        sample_seed = seed
+                        sample_rng = rng
+                        sampled_cfg = _sample_deformation_config(case_name, rng)
+                        
+                    else:
+                        # Deformation cases (case2_small, case3_large)
+                        sample_seed = seed
+                        sample_rng = rng
+                        sampled_cfg = _sample_deformation_config(case_name, sample_rng)
+
+                        # the number of candidates means I will deform as many times the candidates says.
+                        num_candidates = min(int(sampled_cfg["num_candidates"]), number_vertices)
+                        candidate_ids = sample_rng.choice(number_vertices, size=num_candidates, replace=False)
+                        handle_ids = [int(v) for v in np.atleast_1d(candidate_ids)]
+                        
+                        # Apply group_candidates logic
+                        # If group_candidates is has a number>1 then we take additional candidate to make more deformations at the same times
+                        # it is basically deform on more directions
+                        n_group_candidates = sampled_cfg["group_candidates"]
+                        pool_grouped_candidates = {}
+                        if n_group_candidates > 1:
+                            # add to the pool random additional candidates to group with the main one
+                            for handle_id in handle_ids:
+                                pool_grouped_candidates[handle_id] = [handle_id] # add itself
+                                # generate new candites
+                                pool_grouped_candidates[handle_id].extend(
+                                    int(v) for v in sample_rng.choice(
+                                        [idx for idx in range(number_vertices) if idx != handle_id],
+                                        size=n_group_candidates - 1,
+                                        replace=False,
+                                    )
+                                )
+                                
+                        else:
+                            pool_grouped_candidates = {handle_id: [handle_id] for handle_id in handle_ids}
+
+                        # for each candidate perform deformation with its group of candidates.
+
+                        # We need a file on disk for the graphop backend
+                        with tempfile.NamedTemporaryFile(
+                                suffix=".obj", delete=False, mode="w"
+                        ) as tmp:
+                            tmp_path = tmp.name
+                        try:
+                            mesh.export(tmp_path)
+                        except Exception as exc:  # noqa: BLE001
+                            append_error_log(log_path, mesh_name, f"could not export temp OBJ: {exc}")
+                            os.unlink(tmp_path)
+                            total_failed += 1
+                            continue
+
+
+                        deformed = mesh.copy() # Mesh is nice and smooth here, it will be deformed by each handle
+                        quality = None  # Track mesh quality across deformations
+                        deformation_failed = False  # Track if any deformation failed
+
+                        for handle_id in handle_ids:
+                            # for each cadidate builds the rois and displacements
+                            roi_union: set[int] = set()
+                            target_positions: List[np.ndarray] = []
+                            displacements: List[np.ndarray] = []
+                            handle_positions: List[np.ndarray] = []
+
+                            handle_ids_in_group = pool_grouped_candidates[handle_id]
+
+                            for handle_id in handle_ids_in_group:
+                                handle_center = deformed.vertices[handle_id]
+                                normal = deformed.vertex_normals[handle_id]
+                                _, nearest_ids = extract_roi_patch(deformed.vertices, handle_center, 0.0)
+                                for r in np.linspace(0.0, bbox_diag, num=100):
+                                    _, nearest_ids = extract_roi_patch(deformed.vertices, handle_center, radius=r)
+                                    if len(nearest_ids) > roi_vertex_ratio * number_vertices:
+                                        print(f"Found {len(nearest_ids)} at handle_id={handle_id} which is {100 * len(nearest_ids) / number_vertices} % of vertices ")
+                                        print(f"Radius used: {r:.4f}")
+                                        break
+
+                                roi_union.update(int(idx) for idx in nearest_ids)
+                                handle_pos = deformed.vertices[handle_id].copy()
+                                displacement = compute_valid_displacement(
+                                    handle_pos,
+                                    com,
+                                    normal,
+                                    sample_rng,
+                                    max_ratio=sampled_cfg["max_ratio"],
+                                )
+                                target_positions.append(handle_pos + displacement)
+                                displacements.append(displacement)
+                                handle_positions.append(handle_pos)
+
+                            if not roi_union:
+                                append_error_log(
+                                    log_path,
+                                    sample_name,
+                                    "empty ROI for sampled deformation",
+                                    template_id=mesh_name,
+                                    deformation_case=case_name,
+                                )
+                                total_failed += 1
+                                deformation_failed = True
+                                break  # Stop deforming if ROI is empty
+                            # now deforms for this candidate
+                            try:
+                                # Use CLI ring_size if provided, otherwise use the sampled value from the case
+                                effective_ring_size = ring_size if ring_size is not None else sampled_cfg["ring_size"]
+                                V_new, F_new, deform_meta = deform_mesh_with_graphop(
+                                    mesh_path=tmp_path,
+                                    handle_id=handle_ids_in_group,
+                                    target_pos=np.asarray(target_positions, dtype=np.float64),
+                                    ring_size=effective_ring_size,
+                                    roi_ids=sorted(roi_union),
+                                    method=deform_method,
+                                    alpha=float(sampled_cfg["alpha"]),
+                                    max_iter=max_iter,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                append_error_log(
+                                    log_path,
+                                    sample_name,
+                                    f"deformation failed: {exc}",
+                                    template_id=mesh_name,
+                                    deformation_case=case_name,
+                                    traceback_text=traceback.format_exc(),
+                                )
+                                total_failed += 1
+                                deformation_failed = True
+                                break  # Stop deforming if deformation fails
+
+                            # Smooth + validate geometry
+                            # Gets a new mesh,
+                            deformed, quality = smooth_and_validate_mesh(
+                                V_new,
+                                F_new,
+                                int(sampled_cfg["smooth_iterations"]),
+                                drop_non_watertight=drop_non_watertight,
+                            )
+
+                            if deformed is None:
+                                append_error_log(
+                                    log_path,
+                                    sample_name,
+                                    "mesh invalid after deformation/smoothing "
+                                    f"(watertight={quality.get('is_watertight')}, "
+                                    f"degenerate_faces={quality.get('degenerate_face_count')}, "
+                                    f"reason={quality.get('validation_error', 'unknown')})",
+                                    template_id=mesh_name,
+                                    deformation_case=case_name,
+                                )
+                                total_failed += 1
+                                deformation_failed = True
+                                break  # Stop deforming if mesh is invalid
+
+                            # save this mesh to continue deforming
+                            deformed.export(str(tmp_path))
+
+                        # Skip sample if deformation failed
+                        if deformation_failed or quality is None:
+                            os.unlink(tmp_path)
+                            continue
+
                     sample_name = _make_sample_id(sample_idx, template_name=mesh_name)
                     sample_idx += 1
-                    # TODO: this antipattern one seed only!!
-                    sample_seed = int(rng.integers(0, 2**31 - 1))
-                    sample_rng = np.random.default_rng(sample_seed)
-                    sampled_cfg = _sample_deformation_config(case_name, sample_rng)
-
-                    # the number of candidates means I will deform as many times the candidates says.
-                    num_candidates = min(int(sampled_cfg["num_candidates"]), number_vertices)
-                    candidate_ids = sample_rng.choice(number_vertices, size=num_candidates, replace=False)
-                    handle_ids = [int(v) for v in np.atleast_1d(candidate_ids)]
                     
-                    # Apply group_candidates logic
-                    # If group_candidates is has a number>1 then we take additional candidate to make more deformations at the same times
-                    # it is basically deform on more directions
-                    n_group_candidates = sampled_cfg["group_candidates"]
-                    pool_grouped_candidates = {}
-                    if n_group_candidates > 1:
-                        # add to the pool random additional candidates to group with the main one
-                        for handle_id in handle_ids:
-                            pool_grouped_candidates[handle_id] = [handle_id] # add itself
-                            # generate new candites
-                            pool_grouped_candidates[handle_id].extend(
-                                int(v) for v in sample_rng.choice(
-                                    [idx for idx in range(number_vertices) if idx != handle_id],
-                                    size=n_group_candidates - 1,
-                                    replace=False,
-                                )
-                            )
-                            
-                    else:
-                        print("group_candidates is False, using only one handle per deformation. The list of extra candidates is empty")
-                        pool_grouped_candidates = {handle_id: [handle_id] for handle_id in handle_ids}
-
-                    # for each candidate perform deformation with its group of candidates.
-
-                    # We need a file on disk for the graphop backend
-                    with tempfile.NamedTemporaryFile(
-                            suffix=".obj", delete=False, mode="w"
-                    ) as tmp:
-                        tmp_path = tmp.name
-                    try:
-                        mesh.export(tmp_path)
-                    except Exception as exc:  # noqa: BLE001
-                        append_error_log(log_path, mesh_name, f"could not export temp OBJ: {exc}")
-                        os.unlink(tmp_path)
-                        total_failed += 1
-                        continue
-
-
-                    deformed = mesh.copy() # Mesh is nice and smooth here, it will be deformed by each handle
-                    quality = None  # Track mesh quality across deformations
-                    deformation_failed = False  # Track if any deformation failed
-
-                    for handle_id in handle_ids:
-                        # for each cadidate builds the rois and displacements
-                        roi_union: set[int] = set()
-                        target_positions: List[np.ndarray] = []
-                        displacements: List[np.ndarray] = []
-                        handle_positions: List[np.ndarray] = []
-
-                        handle_ids_in_group = pool_grouped_candidates[handle_id]
-
-                        for handle_id in handle_ids_in_group:
-                            handle_center = deformed.vertices[handle_id]
-                            normal = deformed.vertex_normals[handle_id]
-                            _, nearest_ids = extract_roi_patch(deformed.vertices, handle_center, 0.0)
-                            for r in np.linspace(0.0, bbox_diag, num=100):
-                                _, nearest_ids = extract_roi_patch(deformed.vertices, handle_center, radius=r)
-                                if len(nearest_ids) > roi_vertex_ratio * number_vertices:
-                                    print(f"Found {len(nearest_ids)} at handle_id={handle_id} which is {100 * len(nearest_ids) / number_vertices} % of vertices ")
-                                    print(f"Radius used: {r:.4f}")
-                                    break
-
-                            roi_union.update(int(idx) for idx in nearest_ids)
-                            handle_pos = deformed.vertices[handle_id].copy()
-                            displacement = compute_valid_displacement(
-                                handle_pos,
-                                com,
-                                normal,
-                                sample_rng,
-                                max_ratio=sampled_cfg["max_ratio"],
-                            )
-                            target_positions.append(handle_pos + displacement)
-                            displacements.append(displacement)
-                            handle_positions.append(handle_pos)
-
-                        if not roi_union:
-                            append_error_log(
-                                log_path,
-                                sample_name,
-                                "empty ROI for sampled deformation",
-                                template_id=mesh_name,
-                                deformation_case=case_name,
-                            )
-                            total_failed += 1
-                            deformation_failed = True
-                            break  # Stop deforming if ROI is empty
-                        # now deforms for this candidate
+                    # For case1_no, create a temporary file with the original mesh (wasn't created during deformation)
+                    if case_name == "case1_no":
+                        with tempfile.NamedTemporaryFile(
+                                suffix=".obj", delete=False, mode="w"
+                        ) as tmp:
+                            tmp_path = tmp.name
                         try:
-                            # Use CLI ring_size if provided, otherwise use the sampled value from the case
-                            effective_ring_size = ring_size if ring_size is not None else sampled_cfg["ring_size"]
-                            V_new, F_new, deform_meta = deform_mesh_with_graphop(
-                                mesh_path=tmp_path,
-                                handle_id=handle_ids_in_group,
-                                target_pos=np.asarray(target_positions, dtype=np.float64),
-                                ring_size=effective_ring_size,
-                                roi_ids=sorted(roi_union),
-                                method=deform_method,
-                                alpha=float(sampled_cfg["alpha"]),
-                                max_iter=max_iter,
-                            )
+                            mesh.export(tmp_path)
                         except Exception as exc:  # noqa: BLE001
-                            append_error_log(
-                                log_path,
-                                sample_name,
-                                f"deformation failed: {exc}",
-                                template_id=mesh_name,
-                                deformation_case=case_name,
-                                traceback_text=traceback.format_exc(),
-                            )
+                            append_error_log(log_path, mesh_name, f"could not export temp OBJ for case1_no: {exc}")
+                            os.unlink(tmp_path)
                             total_failed += 1
-                            deformation_failed = True
-                            break  # Stop deforming if deformation fails
-
-                        # Smooth + validate geometry
-                        # Gets a new mesh,
-                        deformed, quality = smooth_and_validate_mesh(
-                            V_new,
-                            F_new,
-                            int(sampled_cfg["smooth_iterations"]),
-                            drop_non_watertight=drop_non_watertight,
-                        )
-
-                        if deformed is None:
-                            append_error_log(
-                                log_path,
-                                sample_name,
-                                "mesh invalid after deformation/smoothing "
-                                f"(watertight={quality.get('is_watertight')}, "
-                                f"degenerate_faces={quality.get('degenerate_face_count')}, "
-                                f"reason={quality.get('validation_error', 'unknown')})",
-                                template_id=mesh_name,
-                                deformation_case=case_name,
-                            )
-                            total_failed += 1
-                            deformation_failed = True
-                            break  # Stop deforming if mesh is invalid
-
-                        # save this mesh to continue deforming
-                        deformed.export(str(tmp_path))
-
-                    # Skip sample if deformation failed
-                    if deformation_failed or quality is None:
-                        os.unlink(tmp_path)
-                        continue
+                            continue
 
                     signal_factory = None
                     if signal_type is not None:
@@ -1408,7 +1449,7 @@ def generate_dataset(
                         "roi_vertex_ratio": float(roi_vertex_ratio),
                         "mesh_quality": _json_safe(quality),
                         "deform_meta": _json_safe(deform_meta),
-                        "parametrization_method": param_method,
+                        "parametrization_method": None if case_name == "case1_no" else param_method,
                         "warnings": warnings,
                     }
 
@@ -1445,14 +1486,16 @@ def generate_dataset(
 
                     param_success = False
                     param_error = None
-                    if param_method is not None:
+                    # Force param_method to None for case1_no (no deformation case)
+                    effective_param_method = None if case_name == "case1_no" else param_method
+                    if effective_param_method is not None:
                         try:
                             sphere_paths = save_spherical_parametrization(
                                 root=output_root,
                                 name=sample_name,
                                 vertices=np.asarray(deformed.vertices, dtype=np.float64),
                                 faces=np.asarray(deformed.faces, dtype=np.int32),
-                                method=param_method,
+                                method=effective_param_method,
                                 cem_eps=cem_eps,
                                 cem_max_iters=cem_max_iters,
                                 cem_verbose=cem_verbose,
@@ -1474,7 +1517,7 @@ def generate_dataset(
                         paths["labels"],
                         {
                             "parametrization": {
-                                "method": param_method,
+                                "method": effective_param_method,
                                 "success": bool(param_success),
                                 "error": param_error,
                             },
