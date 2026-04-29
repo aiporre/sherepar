@@ -108,6 +108,7 @@ DEFORMATION_CASES: Dict[str, Dict[str, Any]] = {
         "group_candidates": (1, 5),
         "alpha": (0.2, 0.6),
         "smooth_iterations": (5, 15),
+        "ring_size": (1, 3),
     },
     "case3_large": {
         "max_ratio": (0.2, 0.4),
@@ -115,6 +116,7 @@ DEFORMATION_CASES: Dict[str, Dict[str, Any]] = {
         "group_candidates": (1, 5),
         "alpha": (0.2, 0.6),
         "smooth_iterations": (5, 15),
+        "ring_size": (2, 5),
     },
 }
 
@@ -617,6 +619,7 @@ def _sample_deformation_config(case_name: str, rng: np.random.Generator) -> Dict
         "group_candidates": int(rng.choice(cfg["group_candidates"])),
         "alpha": float(rng.uniform(*cfg["alpha"])),
         "smooth_iterations": int(rng.integers(cfg["smooth_iterations"][0], cfg["smooth_iterations"][1] + 1)),
+        "ring_size": int(rng.integers(cfg["ring_size"][0], cfg["ring_size"][1] + 1)),
     }
 
 
@@ -888,6 +891,7 @@ def save_spherical_parametrization(
         cem_eps=cem_eps,
         cem_max_iters=cem_max_iters,
         cem_verbose=cem_verbose,
+        verify=True,
     )
 
     sphere_mesh = trimesh.Trimesh(
@@ -1041,7 +1045,7 @@ def generate_dataset(
         group_candidates: int = 5,
         roi_vertex_ratio: float = 0.3,
         max_ratio: float = 0.8,
-        ring_size: float = 0.0,
+        ring_size: Optional[int] = None,
         deform_method: str = "sre_arap",
         alpha: float = 0.02,
         max_iter: int = 50,
@@ -1129,7 +1133,7 @@ def generate_dataset(
         )
     if not (0.0 < roi_vertex_ratio <= 1.0):
         raise ValueError("roi_vertex_ratio must be in the interval (0, 1]")
-    if ring_size < 0.0:
+    if ring_size is not None and ring_size < 0.0:
         raise ValueError("ring_size must be non-negative")
     if signal_sigma <= 0.0:
         raise ValueError("signal_sigma must be positive")
@@ -1300,11 +1304,13 @@ def generate_dataset(
                             break  # Stop deforming if ROI is empty
                         # now deforms for this candidate
                         try:
+                            # Use CLI ring_size if provided, otherwise use the sampled value from the case
+                            effective_ring_size = ring_size if ring_size is not None else sampled_cfg["ring_size"]
                             V_new, F_new, deform_meta = deform_mesh_with_graphop(
                                 mesh_path=tmp_path,
                                 handle_id=handle_ids_in_group,
                                 target_pos=np.asarray(target_positions, dtype=np.float64),
-                                ring_size=ring_size,
+                                ring_size=effective_ring_size,
                                 roi_ids=sorted(roi_union),
                                 method=deform_method,
                                 alpha=float(sampled_cfg["alpha"]),
@@ -1376,6 +1382,10 @@ def generate_dataset(
                         sample_num_centers = 1
                         sigma_list = [sigma_list[0]]
                         amplitude_list = [amplitude_list[0]]
+                    
+                    # Use CLI ring_size if provided, otherwise use the sampled value from the case
+                    effective_ring_size = ring_size if ring_size is not None else sampled_cfg["ring_size"]
+                    
                     generation_meta: Dict[str, Any] = {
                         "deformation": {
                             "max_ratio": float(sampled_cfg["max_ratio"]),
@@ -1383,7 +1393,7 @@ def generate_dataset(
                             "group_candidates": bool(sampled_cfg["group_candidates"]),
                             "alpha": float(sampled_cfg["alpha"]),
                             "smooth_iterations": int(sampled_cfg["smooth_iterations"]),
-                            "ring_size": float(ring_size),
+                            "ring_size": int(effective_ring_size),
                             "deform_method": deform_method,
                             "max_iter": int(max_iter),
                         },
@@ -1563,7 +1573,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--group-candidates", type=int, default=5, help="Legacy parameter kept for backward compatibility.")
     parser.add_argument("--roi-vertex-ratio", type=float, default=0.3, help="ROI-growth stop criterion as a fraction of the mesh vertex count.")
     parser.add_argument("--max-ratio", type=float, default=0.8, help="Legacy parameter kept for backward compatibility.")
-    parser.add_argument("--ring-size", type=float, default=0.0, help="Euclidean translation ring radius passed to graphop.deform_surface.")
+    parser.add_argument("--ring-size", type=int, default=None, help="Euclidean translation ring radius (if not provided, value is sampled from the deformation case).")
     parser.add_argument(
         "--deform-method",
         choices=("sre_arap", "original_arap", "spokes_and_rims"),
