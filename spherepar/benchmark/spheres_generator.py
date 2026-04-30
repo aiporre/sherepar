@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 from scipy.spatial import Delaunay
 
 
-def generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=100, seed: int=42):
+def generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=100):
     """
     Generate random points on an ellipsoid surface using fibonacci sphere algorithm
     with random perturbation.
@@ -16,7 +16,7 @@ def generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=100, seed: int=
     Returns:
     points: Array of (x, y, z) coordinates on the ellipsoid
     """
-    np.random.seed(seed)
+    # np.random.seed(seed)
 
     # first use the seed to numpy
     # Use Fibonacci sphere for better distribution
