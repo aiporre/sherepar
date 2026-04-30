@@ -77,7 +77,8 @@ def parse_args():
 def main():
     args = parse_args()
     print("Generating random points on ellipsoid surface...")
-
+    # set seed
+    np.random.seed(args.seed)
 
     # Generate random points on ellipsoid
     vertices = generate_random_ellipsoid_points(
@@ -85,7 +86,6 @@ def main():
         b=args.b,
         c=args.c,
         num_points=args.num_point,
-        seed = args.seed
     )
     print(f"Generated {len(vertices)} random points")
 

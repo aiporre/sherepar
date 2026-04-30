@@ -86,6 +86,13 @@ def parse_args():
         help=("Subdirectory under the output dir to store plots. If omitted, PNGs are saved "
               "next to the OBJ files (i.e. same as output dir)."),
     )
+    parser.add_argument(
+        "--seed",
+        dest="seed",
+        type=int,
+        default=42,
+        help=("Seed for reproducibility."),
+    )
     return parser.parse_args()
 
 
@@ -98,10 +105,14 @@ def main():
     print(f"Number of spheres: {args.num_spheres}")
     print(f"Number of points per sphere: {args.num_point}")
     print(f"Filename template: {args.file_name_template}")
+    print(f"Seed {args.seed}")
 
     # ensure output folder exists
     out_dir = args.output_dir
     os.makedirs(out_dir, exist_ok=True)
+
+    # set seed for reproducibility
+    np.random.seed(args.seed)
 
     # determine where to save plots: if user supplied a plots_subdir, use it under out_dir,
     # otherwise PNGs are placed in the same directory as the OBJ files (out_dir)
