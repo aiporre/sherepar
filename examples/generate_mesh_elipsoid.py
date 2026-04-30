@@ -1,5 +1,6 @@
 import argparse
 import os
+import numpy as np
 
 from spherepar.benchmark.spheres_generator import generate_random_ellipsoid_points, create_watertight_mesh, save_to_obj, \
     plot_ellipsoid
@@ -64,6 +65,12 @@ def parse_args():
         default=None,
         help="Subdirectory under output dir to store plots; if omitted, PNGs are saved next to the OBJ file",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)"
+    )
     return parser.parse_args()
 
 
@@ -71,12 +78,14 @@ def main():
     args = parse_args()
     print("Generating random points on ellipsoid surface...")
 
+
     # Generate random points on ellipsoid
     vertices = generate_random_ellipsoid_points(
         a=args.a,
         b=args.b,
         c=args.c,
         num_points=args.num_point,
+        seed = args.seed
     )
     print(f"Generated {len(vertices)} random points")
 
@@ -126,9 +135,8 @@ def main():
             ax.add_collection3d(poly)
             ax.scatter(vertices[:, 0], vertices[:, 1], vertices[:, 2], c='red', s=20, alpha=0.5)
 
-            max_range = max(
-                vertices[:, 0].ptp(), vertices[:, 1].ptp(), vertices[:, 2].ptp()
-            ) / 2.0
+            # use numpy's functional form np.ptp to compute ranges along each axis
+            max_range = np.max(np.ptp(vertices, axis=0)) / 2.0
             mid_x = (vertices[:, 0].max() + vertices[:, 0].min()) * 0.5
             mid_y = (vertices[:, 1].max() + vertices[:, 1].min()) * 0.5
             mid_z = (vertices[:, 2].max() + vertices[:, 2].min()) * 0.5
@@ -141,7 +149,8 @@ def main():
             fig.savefig(out_png, dpi=args.dpi, bbox_inches='tight')
             plt.close(fig)
             print(f"Saved plot to {out_png}")
-    except Exception:
+    except Exception as e:
+        print('ERROR: ', e)
         print("Plot failed (probably headless). Continuing...")
 
 
