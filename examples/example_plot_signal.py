@@ -9,11 +9,13 @@ Expected input layout::
 
     <input_dir>/
         labels/
-        meshes/
+        meshes/ (or spheres/ if --use-spheres)
+        spheres/ (optional; contains spherical parametrization OBJ files)
         signals/
 
-For each sample name found in ``labels/`` (excluding ``*_signal.json``), the
-script loads the matching mesh from ``meshes/<name>.obj`` and the matching
+For each sample name found in ``labels/`` (excluding ``*_signal.json``),
+the script loads the matching mesh from ``meshes/<name>.obj`` by default (or
+from ``spheres/<name>.obj`` if ``--use-spheres`` is specified), and the matching
 signal from ``signals/<name>.npy``.
 """
 
@@ -38,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         description="Create signal plots for every mesh in a dataset directory."
     )
     parser.add_argument("input_dir", help="Dataset root containing labels/, meshes/, and signals/.")
+    parser.add_argument(
+        "--use-spheres",
+        action="store_true",
+        help="Use OBJ files from <input_dir>/spheres/ instead of meshes/ (spherical parametrization output).",
+    )
     parser.add_argument("--cmap", default="viridis", help="Matplotlib colormap name.")
     parser.add_argument("--linewidths", type=float, default=0.2, help="Triangle edge linewidth.")
     parser.add_argument("--figsize-x", type=float, default=10, help="Figure width in inches.")
@@ -133,14 +140,20 @@ def main() -> None:
 
     input_dir = Path(args.input_dir)
     labels_dir = input_dir / "labels"
+    spheres_dir = input_dir / "spheres"
     meshes_dir = input_dir / "meshes"
     signals_dir = input_dir / "signals"
     output_dir = Path(args.output_dir) if args.output_dir is not None else input_dir / "signal_plots"
 
     if not labels_dir.is_dir():
         raise FileNotFoundError(f"labels directory not found: {labels_dir}")
-    if not meshes_dir.is_dir():
-        raise FileNotFoundError(f"meshes directory not found: {meshes_dir}")
+    if args.use_spheres:
+        if not spheres_dir.is_dir():
+            raise FileNotFoundError(f"spheres directory not found: {spheres_dir}")
+        meshes_dir = spheres_dir
+    else:
+        if not meshes_dir.is_dir():
+            raise FileNotFoundError(f"meshes directory not found: {meshes_dir}")
     if not signals_dir.is_dir():
         raise FileNotFoundError(f"signals directory not found: {signals_dir}")
 
@@ -164,10 +177,11 @@ def main() -> None:
 
         mesh = trimesh.load_mesh(mesh_path)
         signal, signal_source = load_signal(input_dir, sample_name, mesh)
+        plot_sample_names = f"par_{sample_name}" if args.use_spheres else sample_name
         plot_sample(
             mesh=mesh,
             signal=signal,
-            sample_name=sample_name,
+            sample_name=plot_sample_names,
             signal_source=signal_source,
             output_dir=output_dir,
             cmap=args.cmap,
