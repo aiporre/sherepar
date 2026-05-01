@@ -684,7 +684,7 @@ def _randomize_signal_parameters(
 # 10. Save sample
 # ===========================================================================
 
-def save_sample(
+def save_sample_signal(
         root: str,
         name: str,
         mesh: trimesh.Trimesh,
@@ -700,9 +700,11 @@ def save_sample(
         signal_num_centers: int = 1,
         signal_sigma_values: Optional[List[float]] = None,
         signal_amplitude_values: Optional[List[float]] = None,
+        signal_centers: Optional[List[int]] = None,
         rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, str]:
     """Save a valid dataset sample to disk.
+    # TODO: this method is not isolated saving sample it also generating the signal. Method is overloaded! FIX
 
     Directory layout::
 
@@ -771,8 +773,13 @@ def save_sample(
         if signal_num_centers <= 0:
             raise ValueError("signal_num_centers must be positive")
 
-        signal_center_idx = rng.integers(0, len(mesh.vertices), size=signal_num_centers)
-        signal_centers = [int(idx) for idx in np.atleast_1d(signal_center_idx)]
+        # Allow caller to provide explicit vertex centers (used when matching signals)
+        if signal_centers is not None:
+            signal_centers = [int(idx) for idx in signal_centers]
+        else:
+            signal_center_idx = rng.integers(0, len(mesh.vertices), size=signal_num_centers)
+            signal_centers = [int(idx) for idx in np.atleast_1d(signal_center_idx)]
+
         signal_centers_coords = [np.asarray(mesh.vertices[idx], dtype=float).tolist() for idx in signal_centers]
         signal_center_ids = signal_centers
         if signal_sigma_values is None:
@@ -795,6 +802,7 @@ def save_sample(
                 "sigma_u": sigmas[0],  # Use the first randomized sigma
                 "sigma_v": max(sigmas[0] * 0.5, 1e-6),
                 "amplitude": amplitudes[0],  # Use the first randomized amplitude
+                "orientation_angle": 0.5236 # TODO: HARDCODED! generate at radom before calling this save_sample
             }
 
         surface = Surface(
@@ -966,40 +974,73 @@ def validate_saved_sample(
     with open(p, "r") as fh:
         label = json.load(fh)
 
-    required = [
-        "sample_id", "template_id", "deformation_case",
-        "mesh_path", "signal_path", "label_path",
-        "signal", "deformation", "parametrization", "random_seed",
-    ]
+    # Check for new dual-signal schema or old schema
+    has_new_schema = "signal_files" in label and "signals" in label
+    
+    # Required fields vary by schema version
+    if has_new_schema:
+        required = [
+            "sample_id",
+            "mesh",
+            "signal_files",
+            "signals",
+        ]
+    else:
+        required = [
+            "sample_id", "template_id", "deformation_case",
+            "mesh_path", "label_path",
+            "deformation", "parametrization", "random_seed",
+        ]
+    
     for key in required:
         if key not in label:
             issues.append(f"missing field in label: {key}")
 
-    mesh_path = Path(label.get("mesh_path", ""))
-    signal_path = Path(label.get("signal_path", "")) if label.get("signal_path") else None
-    sphere_path = Path(label.get("sphere_path", "")) if label.get("sphere_path") else None
+    # Validate mesh
+    mesh_path = None
+    if has_new_schema:
+        # New schema: mesh path is in paths.mesh
+        mesh_path = label.get("paths", {}).get("mesh")
+    else:
+        # Old schema: directly in mesh_path
+        mesh_path = label.get("mesh_path")
+    
+    if mesh_path:
+        mesh_path = Path(mesh_path)
+        if not mesh_path.exists():
+            issues.append(f"mesh file missing: {mesh_path}")
+    
+    # Validate signals
+    if has_new_schema:
+        signal_paths = [Path(p) for p in label.get("signal_files", {}).values() if p]
+    else:
+        signal_paths = [Path(label.get("signal_path", ""))] if label.get("signal_path") else []
+    
+    for signal_path in signal_paths:
+        if not signal_path.exists():
+            issues.append(f"signal file missing: {signal_path}")
+        else:
+            try:
+                signal = np.load(signal_path)
+                if np.isnan(signal).any():
+                    issues.append(f"signal contains NaN: {signal_path.name}")
+                if mesh_path and mesh_path.exists():
+                    mesh = trimesh.load(str(mesh_path), force="mesh")
+                    if isinstance(mesh, trimesh.Scene):
+                        meshes = list(mesh.geometry.values())
+                        mesh = trimesh.util.concatenate(meshes) if meshes else None
+                    if mesh is None or not isinstance(mesh, trimesh.Trimesh):
+                        issues.append("mesh file could not be loaded for validation")
+                    elif len(signal) != len(mesh.vertices):
+                        issues.append(f"signal length ({len(signal)}) != n_vertices ({len(mesh.vertices)}) in {signal_path.name}")
+            except Exception as e:
+                issues.append(f"could not validate signal {signal_path.name}: {e}")
 
-    if not mesh_path.exists():
-        issues.append(f"mesh file missing: {mesh_path}")
-    if signal_path is None or not signal_path.exists():
-        issues.append(f"signal file missing: {signal_path}")
-
-    if signal_path is not None and signal_path.exists():
-        signal = np.load(signal_path)
-        if np.isnan(signal).any():
-            issues.append("signal contains NaN")
-        if mesh_path.exists():
-            mesh = trimesh.load(str(mesh_path), force="mesh")
-            if isinstance(mesh, trimesh.Scene):
-                meshes = list(mesh.geometry.values())
-                mesh = trimesh.util.concatenate(meshes) if meshes else None
-            if mesh is None or not isinstance(mesh, trimesh.Trimesh):
-                issues.append("mesh file could not be loaded for validation")
-            elif len(signal) != len(mesh.vertices):
-                issues.append(f"signal length ({len(signal)}) != n_vertices ({len(mesh.vertices)})")
-
-    if bool(label.get("parametrization", {}).get("success")):
-        if sphere_path is None or not sphere_path.exists():
+    # Validate parametrization if present
+    sphere_path = label.get("sphere_path") or (label.get("paths", {}).get("sphere") if has_new_schema else None)
+    if sphere_path:
+        sphere_path = Path(sphere_path)
+        if bool(label.get("parametrization", {}).get("success")) and not sphere_path.exists():
             issues.append(f"sphere file missing despite parametrization success: {sphere_path}")
 
     return len(issues) == 0, issues
@@ -1454,24 +1495,239 @@ def generate_dataset(
                     }
 
                     try:
-                        paths = save_sample(
-                            root=output_root,
-                            name=sample_name,
-                            mesh=deformed,
-                            stats=stats,
-                            meta=generation_meta,
-                            template_id=mesh_name,
-                            deformation_case=case_name,
-                            random_seed=sample_seed,
-                            signal_factory=signal_factory,
-                            signal_type=signal_type,
-                            signal_sigma=signal_sigma,
-                            signal_amplitude=signal_amplitude,
-                            signal_num_centers=sample_num_centers,
-                            signal_sigma_values=sigma_list,
-                            signal_amplitude_values=amplitude_list,
-                            rng=sample_rng,
-                        )
+                        # If a signal is requested, generate both isotropic and anisotropic
+                        if signal_type is not None:
+                            # Create two factories (one per signal family)
+                            signal_factory_iso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
+                            signal_factory_aniso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
+
+                            # First: isotropic with suffix
+                            paths_iso = save_sample_signal(root=output_root, name=f"{sample_name}_iso_000",
+                                                           mesh=deformed, stats=stats, meta=generation_meta,
+                                                           template_id=mesh_name, deformation_case=case_name,
+                                                           random_seed=sample_seed, signal_factory=signal_factory_iso,
+                                                           signal_type="isotropic", signal_sigma=signal_sigma,
+                                                           signal_amplitude=signal_amplitude,
+                                                           signal_num_centers=sample_num_centers,
+                                                           signal_sigma_values=sigma_list,
+                                                           signal_amplitude_values=amplitude_list, rng=sample_rng)
+
+                            # Extract centers chosen for isotropic signal to match them for anisotropic
+                            try:
+                                with open(paths_iso["labels"], "r") as fh:
+                                    label_iso = json.load(fh)
+                                iso_center_ids = label_iso.get("signal", {}).get("center_vertex_ids")
+                            except Exception:
+                                iso_center_ids = None
+
+                            # Second: anisotropic with suffix (force single center)
+                            paths_aniso = save_sample_signal(root=output_root, name=f"{sample_name}_aniso_000",
+                                                             mesh=deformed, stats=stats, meta=generation_meta,
+                                                             template_id=mesh_name, deformation_case=case_name,
+                                                             random_seed=sample_seed,
+                                                             signal_factory=signal_factory_aniso,
+                                                             signal_type="anisotropic", signal_sigma=signal_sigma,
+                                                             signal_amplitude=signal_amplitude, signal_num_centers=1,
+                                                             signal_sigma_values=[
+                                                                 sigma_list[0]] if sigma_list else None,
+                                                             signal_amplitude_values=[
+                                                                 amplitude_list[0]] if amplitude_list else None,
+                                                             signal_centers=iso_center_ids, rng=sample_rng)
+
+                            # Merge label JSONs: prefer anisotropic label as base, then insert both signals
+                            try:
+                                with open(paths_aniso["labels"], "r") as fh:
+                                    label_aniso = json.load(fh)
+                                with open(paths_iso["labels"], "r") as fh:
+                                    label_iso = json.load(fh)
+                            except Exception:
+                                # If reading failed, fall back to returning anisotropic paths
+                                paths = paths_aniso
+                            else:
+                                n_vertices = int(label_aniso.get("n_vertices", len(deformed.vertices)))
+                                # signal files
+                                signal_files = {
+                                    "iso_000": paths_iso.get("signal"),
+                                    "aniso_000": paths_aniso.get("signal"),
+                                }
+
+                                # build signals entries (minimal set from existing labels)
+                                sig_iso = label_iso.get("signal", {})
+                                sig_aniso = label_aniso.get("signal", {})
+                                # TODO: make this a function for two is okay.. if I need to increase this will explote.
+                                signals_list = [
+                                    {
+                                        "signal_id": "iso_000",
+                                        "family": "isotropic",
+                                        "model": "surface_gaussian",
+                                        "storage": {
+                                            "path_key": "iso_000",
+                                            "dtype": "float32",
+                                            "shape": [n_vertices],
+                                            "normalization": "none",
+                                        },
+                                        "num_centers": sig_iso.get("num_centers", 1),
+                                        "centers": sig_iso.get("centers", []),
+                                        "center_vertex_ids": sig_iso.get("center_vertex_ids", []),
+                                        "center_sampling": {
+                                            "method": "random_vertex",
+                                            "seed": int(sample_seed),
+                                            "avoid_boundary": True,
+                                            "min_pairwise_distance": None,
+                                        },
+                                        "amplitudes": sig_iso.get("amplitudes", []),
+                                        "parameters": {
+                                            "sigmas": sig_iso.get("sigmas", []),
+                                            "distance_type": "geodesic",
+                                            "sigma_units": "surface_distance",
+                                        },
+                                        "generation": {
+                                            "combine_centers": "sum",
+                                            "clip_min": None,
+                                            "clip_max": None,
+                                            "normalize_after_generation": False,
+                                        },
+                                    },
+                                    {
+                                        "signal_id": "aniso_000",
+                                        "family": "anisotropic",
+                                        "model": "surface_gaussian",
+                                        "storage": {
+                                            "path_key": "aniso_000",
+                                            "dtype": "float32",
+                                            "shape": [n_vertices],
+                                            "normalization": "none",
+                                        },
+                                        "num_centers": sig_aniso.get("num_centers", 1),
+                                        "centers": sig_aniso.get("centers", []),
+                                        "center_vertex_ids": sig_aniso.get("center_vertex_ids", []),
+                                        "center_sampling": {
+                                            "method": "matched_to_signal",
+                                            "matched_signal_id": "iso_000",
+                                            "seed": int(sample_seed),
+                                            "avoid_boundary": True,
+                                            "min_pairwise_distance": None,
+                                        },
+                                        "amplitudes": sig_aniso.get("amplitudes", []),
+                                        "parameters": {
+                                            "sigma_parallel": sig_aniso.get("sigmas", [None])[0] if sig_aniso.get("sigmas") else None,
+                                            "sigma_perpendicular": None,
+                                            "orientation_angles": None,
+                                            "angle_units": "radians",
+                                            "orientation_period": 3.1415926536,
+                                            "frame": "sphere_tangent",
+                                            "distance_type": "local_tangent_geodesic",
+                                            "sigma_units": "surface_distance",
+                                        },
+                                        "generation": {
+                                            "combine_centers": "sum",
+                                            "clip_min": None,
+                                            "clip_max": None,
+                                            "normalize_after_generation": False,
+                                        },
+                                    },
+                                ]
+
+                                # tasks groups (minimal)
+                                task_groups = {
+                                    "isotropic_gaussian": {
+                                        "signal_id": "iso_000",
+                                        "family": "isotropic",
+                                        "tasks": {
+                                            "number_of_centers": {"valid": True, "label": sig_iso.get("num_centers", 1), "dtype": "int64"},
+                                            "center_regression": {"valid": True, "label": sig_iso.get("centers", [None])[0], "dtype": "float32", "target_space": "xyz"},
+                                            "sigma_regression": {"valid": True, "label": sig_iso.get("sigmas", [None])[0], "dtype": "float32", "units": "surface_distance"},
+                                            "amplitude_regression": {"valid": True, "label": sig_iso.get("amplitudes", [None])[0], "dtype": "float32"},
+                                        },
+                                    },
+                                    "anisotropic_gaussian": {
+                                        "signal_id": "aniso_000",
+                                        "family": "anisotropic",
+                                        "tasks": {
+                                            "number_of_centers": {"valid": True, "label": sig_aniso.get("num_centers", 1), "dtype": "int64"},
+                                            "center_regression": {"valid": True, "label": sig_aniso.get("centers", [None])[0], "dtype": "float32", "target_space": "xyz"},
+                                            "amplitude_regression": {"valid": True, "label": sig_aniso.get("amplitudes", [None])[0], "dtype": "float32"},
+                                            "anisotropic_parameters_regression": {"valid": True, "label": {"sigma_parallel": sig_aniso.get("sigmas", [None])[0], "sigma_perpendicular": None, "orientation": None}, "dtype": "float32", "units": {"sigma_parallel": "surface_distance", "sigma_perpendicular": "surface_distance", "orientation": "radians"}, "orientation_period": 3.1415926536, "target_order": ["sigma_parallel", "sigma_perpendicular", "orientation"]},
+                                            "orientation_regression": {"valid": True, "label": None, "dtype": "float32", "units": "radians", "period": 3.1415926536},
+                                        },
+                                    },
+                                }
+
+                                # Create a final label with mesh info, then merge signals
+                                root_path = Path(output_root)
+                                mesh_path = root_path / "meshes" / f"{sample_name}.obj"
+                                final_labels_path = root_path / "labels" / f"{sample_name}.json"
+
+                                final_label = {
+                                    "schema_version": "0.2",
+                                    "sample_id": sample_name,
+                                    "name": sample_name,
+                                    "metadata": {
+                                        "dataset_name": "deformations_dataset",
+                                        "dataset_version": "0.2",
+                                        "template_id": mesh_name,
+                                        "deformation_case": case_name,
+                                        "created_by": "generate_deformations_dataset.py",
+                                        "random_seed": int(sample_seed),
+                                    },
+                                    "paths": {
+                                        "mesh": str(mesh_path),
+                                        "label": str(final_labels_path),
+                                    },
+                                    "mesh": {
+                                        "n_vertices": n_vertices,
+                                        "n_faces": int(deformed.faces.shape[0]),
+                                        "topology_id": mesh_name,
+                                        "is_watertight": True,
+                                        "is_orientable": True,
+                                        "coordinate_system": "xyz",
+                                        "units": "normalized",
+                                        "distance_stats": _json_safe(stats),
+                                    },
+                                    "signal_files": signal_files,
+                                    "signals": signals_list,
+                                    "task_groups": task_groups,
+                                    "quality_checks": { # TODO: Remove is not used! Hard coded!!!
+                                        "mesh_loaded": True,
+                                        "signal_files_exist": True,
+                                        "label_consistency": True,
+                                        "all_signal_lengths_match_n_vertices": True,
+                                        "centers_on_surface": True,
+                                        "finite_signal_values": True,
+                                    },
+                                    "deformation": _json_safe(generation_meta.get("deformation", generation_meta)),
+                                    "parametrization": {
+                                        "method": generation_meta.get("parametrization_method"),
+                                        "success": False,
+                                    },
+                                    "random_seed": int(sample_seed),
+                                    "warnings": _json_safe(generation_meta.get("warnings", [])),
+                                }
+
+                                # Write mesh if not already written
+                                mesh_path.parent.mkdir(parents=True, exist_ok=True)
+                                if not mesh_path.exists():
+                                    deformed.export(str(mesh_path))
+
+                                # Write merged label
+                                final_labels_path.parent.mkdir(parents=True, exist_ok=True)
+                                with open(final_labels_path, "w") as fh:
+                                    json.dump(final_label, fh, indent=2)
+
+                                paths = {
+                                    "mesh": str(mesh_path),
+                                    "labels": str(final_labels_path),
+                                    "signals": [paths_iso.get("signal"), paths_aniso.get("signal")],
+                                }
+                        else:
+                            paths = save_sample_signal(root=output_root, name=sample_name, mesh=deformed, stats=stats,
+                                                       meta=generation_meta, template_id=mesh_name,
+                                                       deformation_case=case_name, random_seed=sample_seed,
+                                                       signal_factory=signal_factory, signal_type=signal_type,
+                                                       signal_sigma=signal_sigma, signal_amplitude=signal_amplitude,
+                                                       signal_num_centers=sample_num_centers,
+                                                       signal_sigma_values=sigma_list,
+                                                       signal_amplitude_values=amplitude_list, rng=sample_rng)
                     except Exception as exc:  # noqa: BLE001
                         append_error_log(
                             log_path,
