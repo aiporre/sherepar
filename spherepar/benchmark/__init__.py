@@ -22,7 +22,6 @@ from spherepar.benchmark.dataset_generator import (
     compute_sampling_cube_from_volume,
     sample_handle_centers,
     compute_valid_displacement,
-    extract_roi_patch,
     deform_mesh_with_graphop,
     smooth_and_validate_mesh,
     compute_patch_to_mesh_stats,
@@ -32,6 +31,7 @@ from spherepar.benchmark.dataset_generator import (
     append_error_log,
     generate_dataset,
 )
+from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.splits import (
     build_task_splits,
     is_valid_for_number_of_centers,

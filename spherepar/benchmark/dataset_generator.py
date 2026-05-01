@@ -62,6 +62,7 @@ import numpy as np
 import trimesh
 import trimesh.smoothing
 
+from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.surface import Surface, SurfaceFactory
 from spherepar.spherical_parametrization import compute_spherical_parametrization
 from spherepar.benchmark.splits import build_task_splits, DEFAULT_TASKS
@@ -405,48 +406,6 @@ def compute_valid_displacement(
     return displacement
 
 # ===========================================================================
-# 6. ROI patch extraction
-# ===========================================================================
-
-def extract_roi_patch(
-        vertices: np.ndarray,
-        center: np.ndarray,
-        radius: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract vertices within *radius* of *center* using a KD-tree query.
-
-    Uses scipy.spatial.cKDTree (O(n log n) construction, O(log n) per query)
-    for efficient spatial indexing.
-
-    Parameters
-    ----------
-    vertices:
-        All mesh vertices, shape (N, 3).
-    center:
-        Query point, shape (3,).
-    radius:
-        Search radius.
-
-    Returns
-    -------
-    patch_vertices : np.ndarray, shape (K, 3)
-        Positions of vertices in the patch.
-    patch_indices : np.ndarray, shape (K,)
-        0-based indices into *vertices*.
-    """
-    from scipy.spatial import cKDTree  # pylint: disable=import-outside-toplevel
-
-    tree = cKDTree(vertices)
-    indices = np.array(tree.query_ball_point(center, radius), dtype=np.intp)
-    if len(indices) == 0:
-        # Fallback: nearest single vertex
-        print("Fallback no nearest in radius ", radius)
-        _, idx = tree.query(center)
-        indices = np.array([idx], dtype=np.intp)
-    return vertices[indices], indices
-
-
-# ===========================================================================
 # 7. Deformation via graphop
 # ===========================================================================
 
@@ -639,8 +598,8 @@ def _randomize_signal_parameters(
         num_centers: int,
         variation_percent: float = 20.0,
         rng: Optional[np.random.Generator] = None,
-) -> Tuple[List[float], List[float]]:
-    """Randomize signal parameters (sigma, amplitude) by ±variation_percent.
+) -> Tuple[List[float], List[float], List[float]]:
+    """Randomize signal parameters (sigma, amplitude, orientation) by ±variation_percent.
     
     Parameters
     ----------
@@ -657,8 +616,9 @@ def _randomize_signal_parameters(
     
     Returns
     -------
-    Tuple[List[float], List[float]]
-        (sigma_list, amplitude_list) with one value per center.
+    Tuple[List[float], List[float], List[float]]
+        (sigma_list, amplitude_list, orientation_list) with one value per center.
+        Orientations are in radians, uniformly sampled from [0, π).
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -668,6 +628,7 @@ def _randomize_signal_parameters(
     
     sigma_list = []
     amplitude_list = []
+    orientation_list = []
     
     for _ in range(num_centers):
         # Sample variation factor: (1 - variation_frac) to (1 + variation_frac)
@@ -676,13 +637,42 @@ def _randomize_signal_parameters(
         
         sigma_list.append(float(sigma * sigma_factor))
         amplitude_list.append(float(amplitude * amplitude_factor))
+        
+        # Orientation angle uniformly in [0, π) radians
+        orientation = rng.uniform(0.0, np.pi)
+        orientation_list.append(float(orientation))
     
-    return sigma_list, amplitude_list
+    return sigma_list, amplitude_list, orientation_list
 
 
 # ===========================================================================
 # 10. Save sample
 # ===========================================================================
+
+def save_sample_mesh(root: str, name: str, mesh: trimesh.Trimesh) -> str:
+    """
+    Save the object on the correct file structure
+    Parameters
+    ----------
+    root
+    name
+
+    Returns
+    -------
+
+    """
+    root_path = Path(root)
+    meshes_dir = root_path / "meshes"
+    labels_dir = root_path / "labels"
+    signal_dir = root_path / "signals"
+
+    for d in (meshes_dir, labels_dir, signal_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    mesh_path = meshes_dir / f"{name}.obj"
+    # Write OBJ
+    mesh.export(str(mesh_path))
+    return str(mesh_path)
 
 def save_sample_signal(
         root: str,
@@ -753,8 +743,11 @@ def save_sample_signal(
     mesh_path = meshes_dir / f"{name}.obj"
     labels_path = labels_dir / f"{name}.json"
 
-    # Write OBJ
-    mesh.export(str(mesh_path))
+    # # Write OBJ
+    # DEVNOTE: we save the mesh after signal generation,
+    #  since some signal types may modify vertex positions
+    #  (e.g. anisotropic Gaussian with orientation based on local geometry)
+    # mesh.export(str(mesh_path))
 
     # Write signal arrays
     # create a surface without signal
@@ -1450,7 +1443,7 @@ def generate_dataset(
                     sample_num_centers = signal_num_centers_choice
 
                     # Randomize signal parameters
-                    sigma_list, amplitude_list = _randomize_signal_parameters(
+                    sigma_list, amplitude_list, orientation_list = _randomize_signal_parameters(
                         sigma=signal_sigma,
                         amplitude=signal_amplitude,
                         num_centers=sample_num_centers,
@@ -1464,6 +1457,7 @@ def generate_dataset(
                         sample_num_centers = 1
                         sigma_list = [sigma_list[0]]
                         amplitude_list = [amplitude_list[0]]
+                        orientation_list = [orientation_list[0]]
                     
                     # Use CLI ring_size if provided, otherwise use the sampled value from the case
                     effective_ring_size = ring_size if ring_size is not None else sampled_cfg["ring_size"]
@@ -1502,15 +1496,21 @@ def generate_dataset(
                             signal_factory_aniso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
 
                             # First: isotropic with suffix
-                            paths_iso = save_sample_signal(root=output_root, name=f"{sample_name}_iso_000",
-                                                           mesh=deformed, stats=stats, meta=generation_meta,
-                                                           template_id=mesh_name, deformation_case=case_name,
-                                                           random_seed=sample_seed, signal_factory=signal_factory_iso,
-                                                           signal_type="isotropic", signal_sigma=signal_sigma,
+                            paths_iso = save_sample_signal(root=output_root,
+                                                           name=f"{sample_name}_iso_000",
+                                                           mesh=deformed,
+                                                           stats=stats, meta=generation_meta,
+                                                           template_id=mesh_name,
+                                                           deformation_case=case_name,
+                                                           random_seed=sample_seed,
+                                                           signal_factory=signal_factory_iso,
+                                                           signal_type="isotropic",
+                                                           signal_sigma=signal_sigma,
                                                            signal_amplitude=signal_amplitude,
                                                            signal_num_centers=sample_num_centers,
                                                            signal_sigma_values=sigma_list,
-                                                           signal_amplitude_values=amplitude_list, rng=sample_rng)
+                                                           signal_amplitude_values=amplitude_list,
+                                                           rng=sample_rng)
 
                             # Extract centers chosen for isotropic signal to match them for anisotropic
                             try:
@@ -1521,18 +1521,24 @@ def generate_dataset(
                                 iso_center_ids = None
 
                             # Second: anisotropic with suffix (force single center)
-                            paths_aniso = save_sample_signal(root=output_root, name=f"{sample_name}_aniso_000",
-                                                             mesh=deformed, stats=stats, meta=generation_meta,
-                                                             template_id=mesh_name, deformation_case=case_name,
+                            paths_aniso = save_sample_signal(root=output_root,
+                                                             name=f"{sample_name}_aniso_000",
+                                                             mesh=deformed,
+                                                             stats=stats, meta=generation_meta,
+                                                             template_id=mesh_name,
+                                                             deformation_case=case_name,
                                                              random_seed=sample_seed,
                                                              signal_factory=signal_factory_aniso,
-                                                             signal_type="anisotropic", signal_sigma=signal_sigma,
-                                                             signal_amplitude=signal_amplitude, signal_num_centers=1,
+                                                             signal_type="anisotropic",
+                                                             signal_sigma=signal_sigma,
+                                                             signal_amplitude=signal_amplitude,
+                                                             signal_num_centers=1,
                                                              signal_sigma_values=[
                                                                  sigma_list[0]] if sigma_list else None,
                                                              signal_amplitude_values=[
                                                                  amplitude_list[0]] if amplitude_list else None,
-                                                             signal_centers=iso_center_ids, rng=sample_rng)
+                                                             signal_centers=iso_center_ids,
+                                                             rng=sample_rng)
 
                             # Merge label JSONs: prefer anisotropic label as base, then insert both signals
                             try:
@@ -1655,7 +1661,14 @@ def generate_dataset(
 
                                 # Create a final label with mesh info, then merge signals
                                 root_path = Path(output_root)
+                                save_sample_mesh(root=output_root, name=sample_name, mesh=deformed)
+                                # Ensure mesh is saved for label paths
                                 mesh_path = root_path / "meshes" / f"{sample_name}.obj"
+                                if not mesh_path.exists():
+                                    raise FileNotFoundError("Mesh was not created properly."
+                                                            " This breaks the dataset structure as signals and "
+                                                            "labels expect the mesh to exist. Check previous "
+                                                            "error logs for issues during mesh saving.")
                                 final_labels_path = root_path / "labels" / f"{sample_name}.json"
 
                                 final_label = {

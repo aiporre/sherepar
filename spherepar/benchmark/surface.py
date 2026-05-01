@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
+from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.signals import isotropic_gaussian, anisotropic_gaussian
 
 # ---------------------------------------------------------------------------
@@ -643,7 +644,7 @@ class SurfaceFactory:
         Expected keys in *params*: center, normal (optional, estimated from
         mesh if absent), sigma_u, sigma_v, amplitude, orientation_angle.
         """
-        center = _resolve_center(vertices, params.get("center"))
+        center = _resolve_center(vertices, params.get("center")) # get the coordina on the mesh
         normal = params.get("normal")
         if normal is None:
             normal = _estimate_normal(vertices, center)
@@ -653,11 +654,25 @@ class SurfaceFactory:
         sigma_v = float(params.get("sigma_v", 0.05))
         amplitude = float(params.get("amplitude", 1.0))
         orientation_angle = float(params.get("orientation_angle", 0.0))
+        # devnote: just something large for now not in the main generator method
+        # radius = float(params.get("radius", 100))  # Add radius parameter
 
         sig = anisotropic_gaussian(
             vertices, center, normal, sigma_u, sigma_v,
             amplitude, orientation_angle
         )
+
+        # Constrain signal to ROI radius
+        # shrank to get 50% of the mesh:
+        n_samples = vertices.shape[0]
+        center_of_mass = np.mean(vertices, axis=0)
+        radius = float(np.linalg.norm(center - center_of_mass, ord=2))
+        print('>>> Anisotropic signal roi radius:', radius)
+        roi_patch, roi_mask = extract_roi_patch(vertices, center, radius)
+        print(f"Percentatge of ROI patch: {len(roi_patch)/n_samples*100:.2f}%")
+        # print("Roi mask:", roi_mask)
+        # sig = np.where(roi_mask, sig, 0)  # Zero out signal outside ROI
+        sig[roi_mask] = 0
 
         meta = {
             "family": "anisotropic_gaussian",
@@ -667,6 +682,7 @@ class SurfaceFactory:
             "sigma_v": sigma_v,
             "amplitude": amplitude,
             "orientation_angle": orientation_angle,
+            "radius": radius,  # Add to metadata
         }
         return sig, meta
 
