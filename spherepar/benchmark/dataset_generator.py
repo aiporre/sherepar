@@ -596,6 +596,7 @@ def _randomize_signal_parameters(
         sigma: float,
         amplitude: float,
         num_centers: int,
+        sigma_ani: float = None,
         variation_percent: float = 20.0,
         rng: Optional[np.random.Generator] = None,
 ) -> Tuple[List[float], List[float], List[float]]:
@@ -627,8 +628,15 @@ def _randomize_signal_parameters(
     variation_frac = variation_percent / 100.0
     
     sigma_list = []
+    sigma_ani_list = []
     amplitude_list = []
     orientation_list = []
+    # Devnote: anisotropic use only one center so just one pair.
+    if sigma_ani is None:
+        sigma_ani = sigma + 1 # TODO: this quick fix
+    sigma_anisotropic_factor = rng.uniform(1.0 - variation_frac, 1.0 + variation_frac)
+
+    sigma_ani_list.append(float(sigma_anisotropic_factor* sigma_ani))
     
     for _ in range(num_centers):
         # Sample variation factor: (1 - variation_frac) to (1 + variation_frac)
@@ -642,7 +650,7 @@ def _randomize_signal_parameters(
         orientation = rng.uniform(0.0, np.pi)
         orientation_list.append(float(orientation))
     
-    return sigma_list, amplitude_list, orientation_list
+    return sigma_list, amplitude_list, orientation_list, sigma_ani_list
 
 
 # ===========================================================================
@@ -690,6 +698,7 @@ def save_sample_signal(
         signal_num_centers: int = 1,
         signal_sigma_values: Optional[List[float]] = None,
         signal_amplitude_values: Optional[List[float]] = None,
+        signal_orientation_values: Optional[List[float]] = None,
         signal_centers: Optional[List[int]] = None,
         rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, str]:
@@ -790,12 +799,17 @@ def save_sample_signal(
                 "amplitudes": amplitudes,  # Pass per-center amplitudes
             }
         else:
+            # For anisotropic: use sigma_u and sigma_v (where sigma_v = 0.5 * sigma_u)
+            # and randomized orientation angle
+            sigma_u = sigmas[0]
+            sigma_v = max(sigma_u * 0.5, 1e-6)
+            orientation_angle = signal_orientation_values[0] if signal_orientation_values else 0.0
             signal_params = {
                 "center": signal_centers[0],
-                "sigma_u": sigmas[0],  # Use the first randomized sigma
-                "sigma_v": max(sigmas[0] * 0.5, 1e-6),
-                "amplitude": amplitudes[0],  # Use the first randomized amplitude
-                "orientation_angle": 0.5236 # TODO: HARDCODED! generate at radom before calling this save_sample
+                "sigma_u": sigma_u,
+                "sigma_v": sigma_v,
+                "amplitude": amplitudes[0],
+                "orientation_angle": orientation_angle
             }
 
         surface = Surface(
@@ -871,6 +885,8 @@ def save_sample_signal(
     }
     if signal_path is not None:
         result["signal"] = signal_path
+    if signal_type and "signal_params" in meta.get("signal", {}):
+        result["signal_params"] = meta["signal"]["signal_params"]
     return result
 
 
@@ -1098,6 +1114,7 @@ def generate_dataset(
         drop_non_watertight: bool = False,
         signal_type: Optional[str] = "isotropic",
         signal_sigma: float = 0.2,
+        signal_sigma_ani: float = 0.8,
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
         signal_centers_options: Optional[List[int]] = None,
@@ -1443,10 +1460,11 @@ def generate_dataset(
                     sample_num_centers = signal_num_centers_choice
 
                     # Randomize signal parameters
-                    sigma_list, amplitude_list, orientation_list = _randomize_signal_parameters(
+                    sigma_list, amplitude_list, orientation_list, sigma_ani_list = _randomize_signal_parameters(
                         sigma=signal_sigma,
                         amplitude=signal_amplitude,
                         num_centers=sample_num_centers,
+                        sigma_ani=signal_sigma_ani,
                         variation_percent=signal_sigma_variation_percent,
                         rng=sample_rng,
                     )
@@ -1490,6 +1508,7 @@ def generate_dataset(
 
                     try:
                         # If a signal is requested, generate both isotropic and anisotropic
+                        # DevNote: the signal_type variable is used as flag, this is antipattern
                         if signal_type is not None:
                             # Create two factories (one per signal family)
                             signal_factory_iso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
@@ -1510,6 +1529,7 @@ def generate_dataset(
                                                            signal_num_centers=sample_num_centers,
                                                            signal_sigma_values=sigma_list,
                                                            signal_amplitude_values=amplitude_list,
+                                                           signal_orientation_values=orientation_list,
                                                            rng=sample_rng)
 
                             # Extract centers chosen for isotropic signal to match them for anisotropic
@@ -1534,9 +1554,11 @@ def generate_dataset(
                                                              signal_amplitude=signal_amplitude,
                                                              signal_num_centers=1,
                                                              signal_sigma_values=[
-                                                                 sigma_list[0]] if sigma_list else None,
+                                                                 sigma_ani_list[0]] if sigma_ani_list else None,
                                                              signal_amplitude_values=[
                                                                  amplitude_list[0]] if amplitude_list else None,
+                                                             signal_orientation_values=[
+                                                                 orientation_list[0]] if orientation_list else None,
                                                              signal_centers=iso_center_ids,
                                                              rng=sample_rng)
 
@@ -1560,6 +1582,13 @@ def generate_dataset(
                                 # build signals entries (minimal set from existing labels)
                                 sig_iso = label_iso.get("signal", {})
                                 sig_aniso = label_aniso.get("signal", {})
+                                
+                                # Extract signal parameters from the return dicts (which now include signal_params)
+                                sig_iso_params = paths_iso.get("signal_params", {})
+                                sig_aniso_params = paths_aniso.get("signal_params", {})
+                                sigma_u = sig_aniso_params.get("sigma_u", sig_aniso.get("sigmas", [None])[0] if sig_aniso.get("sigmas") else None)
+                                sigma_v = sig_aniso_params.get("sigma_v", None)
+                                orientation_angle = sig_aniso_params.get("orientation_angle", None)
                                 # TODO: make this a function for two is okay.. if I need to increase this will explote.
                                 signals_list = [
                                     {
@@ -1616,9 +1645,9 @@ def generate_dataset(
                                         },
                                         "amplitudes": sig_aniso.get("amplitudes", []),
                                         "parameters": {
-                                            "sigma_parallel": sig_aniso.get("sigmas", [None])[0] if sig_aniso.get("sigmas") else None,
-                                            "sigma_perpendicular": None,
-                                            "orientation_angles": None,
+                                            "sigma_parallel": sigma_u,
+                                            "sigma_perpendicular": sigma_v,
+                                            "orientation_angles": [orientation_angle] if orientation_angle is not None else None,
                                             "angle_units": "radians",
                                             "orientation_period": 3.1415926536,
                                             "frame": "sphere_tangent",
@@ -1653,8 +1682,8 @@ def generate_dataset(
                                             "number_of_centers": {"valid": True, "label": sig_aniso.get("num_centers", 1), "dtype": "int64"},
                                             "center_regression": {"valid": True, "label": sig_aniso.get("centers", [None])[0], "dtype": "float32", "target_space": "xyz"},
                                             "amplitude_regression": {"valid": True, "label": sig_aniso.get("amplitudes", [None])[0], "dtype": "float32"},
-                                            "anisotropic_parameters_regression": {"valid": True, "label": {"sigma_parallel": sig_aniso.get("sigmas", [None])[0], "sigma_perpendicular": None, "orientation": None}, "dtype": "float32", "units": {"sigma_parallel": "surface_distance", "sigma_perpendicular": "surface_distance", "orientation": "radians"}, "orientation_period": 3.1415926536, "target_order": ["sigma_parallel", "sigma_perpendicular", "orientation"]},
-                                            "orientation_regression": {"valid": True, "label": None, "dtype": "float32", "units": "radians", "period": 3.1415926536},
+                                            "anisotropic_parameters_regression": {"valid": True, "label": {"sigma_parallel": sigma_u, "sigma_perpendicular": sigma_v, "orientation": orientation_angle}, "dtype": "float32", "units": {"sigma_parallel": "surface_distance", "sigma_perpendicular": "surface_distance", "orientation": "radians"}, "orientation_period": 3.1415926536, "target_order": ["sigma_parallel", "sigma_perpendicular", "orientation"]},
+                                            "orientation_regression": {"valid": True, "label": orientation_angle, "dtype": "float32", "units": "radians", "period": 3.1415926536},
                                         },
                                     },
                                 }
@@ -1900,7 +1929,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="isotropic",
         help="Synthetic signal family attached after deformation.",
     )
-    parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter.")
+    parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter for isotropic signals.")
+    parser.add_argument("--signal-sigma-ani", type=float, default=0.8, help="Signal width parameter for anisotropic signals.")
     parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
     parser.add_argument("--signal-num-centers", type=int, default=1, help="Maximum number of signal centers (used when --signal-centers-options is not provided).")
     parser.add_argument(
@@ -1981,6 +2011,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         max_iter=args.max_iter,
         signal_type=signal_type,
         signal_sigma=args.signal_sigma,
+        signal_sigma_ani=args.signal_sigma_ani,
         signal_amplitude=args.signal_amplitude,
         signal_num_centers=args.signal_num_centers,
         signal_centers_options=signal_centers_options,

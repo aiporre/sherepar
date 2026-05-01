@@ -13,10 +13,13 @@ Expected input layout::
         spheres/ (optional; contains spherical parametrization OBJ files)
         signals/
 
-For each sample name found in ``labels/`` (excluding ``*_signal.json``),
+For each sample name found in ``labels/`` (excluding ``*_signal.json``, ``*_iso_000.json``, ``*_aniso_000.json``),
 the script loads the matching mesh from ``meshes/<name>.obj`` by default (or
 from ``spheres/<name>.obj`` if ``--use-spheres`` is specified), and the matching
-signal from ``signals/<name>.npy``.
+signal from ``signals/<name>_iso_000.npy`` (preferred for dual-signal datasets)
+or ``signals/<name>.npy`` (for backward compatibility with single-signal datasets).
+
+In dual-signal datasets, the isotropic signal (iso_000) is plotted by default.
 """
 
 from __future__ import annotations
@@ -54,6 +57,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--title", default="Mesh with Signal Values", help="Base plot title.")
     parser.add_argument("--num-views", type=int, default=5, help="Number of azimuth views to render per sample.")
     parser.add_argument(
+        "--signal-type",
+        choices=("iso", "aniso", "auto"),
+        default="auto",
+        help="Which signal to plot: 'iso' (isotropic), 'aniso' (anisotropic), or 'auto' (prefer iso if available, else aniso).",
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Output directory for plots. Defaults to <input_dir>/signal_plots.",
@@ -63,15 +72,65 @@ def parse_args() -> argparse.Namespace:
 
 def iter_sample_names(labels_dir: Path) -> Iterable[str]:
     for label_path in sorted(labels_dir.glob("*.json")):
-        if label_path.stem.endswith("_signal"):
+        stem = label_path.stem
+        if stem.endswith("_signal"):
             continue
-        yield label_path.stem
+        if stem.endswith("_iso_000") or stem.endswith("_aniso_000"):
+            continue
+        yield stem
 
 
-def load_signal(input_dir: Path, sample_name: str, mesh: trimesh.Trimesh) -> tuple[np.ndarray, str]:
-    signal_path = input_dir / "signals" / f"{sample_name}.npy"
-    if not signal_path.is_file():
-        raise FileNotFoundError(f"signal file not found for {sample_name}: {signal_path}")
+def load_signal(
+    input_dir: Path, 
+    sample_name: str, 
+    mesh: trimesh.Trimesh, 
+    signal_type: str = "auto"
+) -> tuple[np.ndarray, str]:
+    """Load signal from disk.
+    
+    Parameters
+    ----------
+    input_dir : Path
+        Dataset root directory.
+    sample_name : str
+        Sample name (base name without signal suffix).
+    mesh : trimesh.Trimesh
+        Mesh for validation.
+    signal_type : str
+        Which signal to load: 'iso', 'aniso', or 'auto'.
+        - 'iso': Load iso_000 signal
+        - 'aniso': Load aniso_000 signal
+        - 'auto': Try iso_000 first, fall back to aniso_000, then to single signal (backward compat)
+    
+    Returns
+    -------
+    tuple[np.ndarray, str]
+        Signal array and source path.
+    """
+    signal_path = None
+    
+    if signal_type == "iso":
+        signal_path = input_dir / "signals" / f"{sample_name}_iso_000.npy"
+        if not signal_path.is_file():
+            raise FileNotFoundError(f"isotropic signal file not found for {sample_name}: {signal_path}")
+    
+    elif signal_type == "aniso":
+        signal_path = input_dir / "signals" / f"{sample_name}_aniso_000.npy"
+        if not signal_path.is_file():
+            raise FileNotFoundError(f"anisotropic signal file not found for {sample_name}: {signal_path}")
+    
+    else:  # auto
+        # Try iso_000 first
+        signal_path = input_dir / "signals" / f"{sample_name}_iso_000.npy"
+        if not signal_path.is_file():
+            # Try aniso_000
+            signal_path = input_dir / "signals" / f"{sample_name}_aniso_000.npy"
+            if not signal_path.is_file():
+                # Fall back to original naming for backward compatibility
+                signal_path = input_dir / "signals" / f"{sample_name}.npy"
+        
+        if not signal_path.is_file():
+            raise FileNotFoundError(f"signal file not found for {sample_name}")
 
     signal = np.load(signal_path)
     if signal.shape[0] != len(mesh.vertices):
@@ -176,7 +235,7 @@ def main() -> None:
             continue
 
         mesh = trimesh.load_mesh(mesh_path)
-        signal, signal_source = load_signal(input_dir, sample_name, mesh)
+        signal, signal_source = load_signal(input_dir, sample_name, mesh, signal_type=args.signal_type)
         plot_sample_names = f"par_{sample_name}" if args.use_spheres else sample_name
         plot_sample(
             mesh=mesh,
