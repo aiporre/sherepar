@@ -1514,7 +1514,7 @@ def generate_dataset(
                             signal_factory_iso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
                             signal_factory_aniso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
 
-                            # First: isotropic with suffix
+                            # First: isotropic with suffix (main, used for classification)
                             paths_iso = save_sample_signal(root=output_root,
                                                            name=f"{sample_name}_iso_000",
                                                            mesh=deformed,
@@ -1539,6 +1539,28 @@ def generate_dataset(
                                 iso_center_ids = label_iso.get("signal", {}).get("center_vertex_ids")
                             except Exception:
                                 iso_center_ids = None
+
+                            # Create a single-center isotropic signal for regression (iso_001).
+                            # If the main isotropic already used a single center, reuse it.
+                            if int(label_iso.get("signal", {}).get("num_centers", 1)) == 1:
+                                paths_iso_single = paths_iso
+                            else:
+                                paths_iso_single = save_sample_signal(root=output_root,
+                                                                     name=f"{sample_name}_iso_001",
+                                                                     mesh=deformed,
+                                                                     stats=stats, meta=generation_meta,
+                                                                     template_id=mesh_name,
+                                                                     deformation_case=case_name,
+                                                                     random_seed=sample_seed,
+                                                                     signal_factory=signal_factory_iso,
+                                                                     signal_type="isotropic",
+                                                                     signal_sigma=signal_sigma,
+                                                                     signal_amplitude=signal_amplitude,
+                                                                     signal_num_centers=1,
+                                                                     signal_sigma_values=[sigma_list[0]] if sigma_list else None,
+                                                                     signal_amplitude_values=[amplitude_list[0]] if amplitude_list else None,
+                                                                     signal_orientation_values=[orientation_list[0]] if orientation_list else None,
+                                                                     rng=sample_rng)
 
                             # Second: anisotropic with suffix (force single center)
                             paths_aniso = save_sample_signal(root=output_root,
@@ -1568,15 +1590,25 @@ def generate_dataset(
                                     label_aniso = json.load(fh)
                                 with open(paths_iso["labels"], "r") as fh:
                                     label_iso = json.load(fh)
+                                with open(paths_iso_single["labels"], "r") as fh:
+                                    label_iso_single = json.load(fh)
                             except Exception:
                                 # If reading failed, fall back to returning anisotropic paths
                                 paths = paths_aniso
                             else:
                                 n_vertices = int(label_aniso.get("n_vertices", len(deformed.vertices)))
-                                # signal files
+                                iso_single_signal_path = paths_iso_single.get("signal")
+                                
+                                # Build signal_files with exactly 3 signals:
+                                # 1. iso_{N:03d} - main isotropic with N centers (classification)
+                                # 2. iso_001_cls - single-center isotropic (classification)
+                                # 3. iso_001_reg - single-center isotropic (regression, same file as cls)
+                                # 4. aniso_001 - anisotropic (always 1 center, regression)
                                 signal_files = {
-                                    "iso_000": paths_iso.get("signal"),
-                                    "aniso_000": paths_aniso.get("signal"),
+                                    f"iso_{sample_num_centers:03d}": paths_iso.get("signal"),
+                                    "iso_001_cls": iso_single_signal_path,
+                                    "iso_001_reg": iso_single_signal_path,
+                                    f"aniso_{1:03d}": paths_aniso.get("signal"),
                                 }
 
                                 # build signals entries (minimal set from existing labels)
