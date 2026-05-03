@@ -682,6 +682,20 @@ def save_sample_mesh(root: str, name: str, mesh: trimesh.Trimesh) -> str:
     mesh.export(str(mesh_path))
     return str(mesh_path)
 
+
+def _to_relative_dataset_path(path_value: Optional[str], dataset_root: Path) -> Optional[str]:
+    """Return a dataset-root-relative path when possible."""
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if not path.is_absolute():
+        return str(path)
+    try:
+        return str(path.relative_to(dataset_root))
+    except ValueError:
+        return str(path)
+
+
 def save_sample_signal(
         root: str,
         name: str,
@@ -826,8 +840,8 @@ def save_sample_signal(
             "signal_type": signal_type,
             "signal_params": _json_safe(signal_params),
             "signal_meta": _json_safe(surface.signal_meta),
-            "signal_file": signal_paths["signal"],
-            "signal_label_file": signal_paths["signal_label"],
+            "signal_file": _to_relative_dataset_path(signal_paths["signal"], root_path),
+            "signal_label_file": _to_relative_dataset_path(signal_paths["signal_label"], root_path),
             "num_centers": int(signal_num_centers),
             "centers": signal_centers_coords,
             "center_vertex_ids": signal_center_ids,
@@ -837,18 +851,21 @@ def save_sample_signal(
         meta["signal"] = signal_info
 
     # Write JSON metadata
-    sphere_path = str(Path(root) / "spheres" / f"{name}.obj")
+    mesh_path_rel = str(mesh_path.relative_to(root_path))
+    label_path_rel = str(labels_path.relative_to(root_path))
+    signal_path_rel = _to_relative_dataset_path(signal_path, root_path)
+    sphere_path_rel = str((root_path / "spheres" / f"{name}.obj").relative_to(root_path))
     label = {
         "sample_id": name,
         "name": name,
         "template_id": template_id,
         "deformation_case": deformation_case,
-        "mesh_file": str(mesh_path),
-        "mesh_path": str(mesh_path),
-        "signal_file": signal_path,
-        "signal_path": signal_path,
-        "sphere_path": sphere_path,
-        "label_path": str(labels_path),
+        "mesh_file": mesh_path_rel,
+        "mesh_path": mesh_path_rel,
+        "signal_file": signal_path_rel,
+        "signal_path": signal_path_rel,
+        "sphere_path": sphere_path_rel,
+        "label_path": label_path_rel,
         "n_vertices": int(mesh.vertices.shape[0]),
         "n_faces": int(mesh.faces.shape[0]),
         "distance_stats": stats,
@@ -933,15 +950,15 @@ def save_spherical_parametrization(
     sphere_label = {
         "name": name,
         "method": method,
-        "sphere_file": str(sphere_path),
+        "sphere_file": str(sphere_path.relative_to(root_path)),
         "metadata": _json_safe(sphere_meta),
     }
     with open(sphere_label_path, "w") as fh:
         json.dump(sphere_label, fh, indent=2)
 
     return {
-        "sphere": str(sphere_path),
-        "spherical_label": str(sphere_label_path),
+        "sphere": str(sphere_path.relative_to(root_path)),
+        "spherical_label": str(sphere_label_path.relative_to(root_path)),
     }
 
 
@@ -1016,12 +1033,29 @@ def validate_saved_sample(
     
     if mesh_path:
         mesh_path = Path(mesh_path)
+        # Handle relative paths (resolve relative to dataset root)
+        if not mesh_path.is_absolute():
+            label_file = Path(label_path)
+            dataset_root = label_file.parent.parent  # labels/ -> dataset_root
+            mesh_path = dataset_root / mesh_path
         if not mesh_path.exists():
             issues.append(f"mesh file missing: {mesh_path}")
     
     # Validate signals
+    signal_paths = []
     if has_new_schema:
-        signal_paths = [Path(p) for p in label.get("signal_files", {}).values() if p]
+        # Extract dataset_root from label_path for resolving relative paths
+        label_file = Path(label_path)
+        dataset_root = label_file.parent.parent  # labels/ -> dataset_root
+        
+        # Convert relative paths to absolute paths
+        for rel_path in label.get("signal_files", {}).values():
+            if rel_path:
+                path = Path(rel_path)
+                if path.is_absolute():
+                    signal_paths.append(path)  # Already absolute
+                else:
+                    signal_paths.append(dataset_root / path)  # Make absolute relative to dataset_root
     else:
         signal_paths = [Path(label.get("signal_path", ""))] if label.get("signal_path") else []
     
@@ -1049,6 +1083,11 @@ def validate_saved_sample(
     sphere_path = label.get("sphere_path") or (label.get("paths", {}).get("sphere") if has_new_schema else None)
     if sphere_path:
         sphere_path = Path(sphere_path)
+        # Handle relative paths (resolve relative to dataset root)
+        if not sphere_path.is_absolute():
+            label_file = Path(label_path)
+            dataset_root = label_file.parent.parent  # labels/ -> dataset_root
+            sphere_path = dataset_root / sphere_path
         if bool(label.get("parametrization", {}).get("success")) and not sphere_path.exists():
             issues.append(f"sphere file missing despite parametrization success: {sphere_path}")
 
@@ -1604,11 +1643,18 @@ def generate_dataset(
                                 # 2. iso_001_cls - single-center isotropic (classification)
                                 # 3. iso_001_reg - single-center isotropic (regression, same file as cls)
                                 # 4. aniso_001 - anisotropic (always 1 center, regression)
+                                
+                                # Convert paths to be relative to output_root for portability
+                                dataset_root = Path(output_root)
+                                iso_path = Path(paths_iso.get("signal"))
+                                iso_single_path = Path(iso_single_signal_path)
+                                aniso_path = Path(paths_aniso.get("signal"))
+                                
                                 signal_files = {
-                                    f"iso_{sample_num_centers:03d}": paths_iso.get("signal"),
-                                    "iso_001_cls": iso_single_signal_path,
-                                    "iso_001_reg": iso_single_signal_path,
-                                    f"aniso_{1:03d}": paths_aniso.get("signal"),
+                                    f"iso_{sample_num_centers:03d}": str(iso_path.relative_to(dataset_root)),
+                                    "iso_001_cls": str(iso_single_path.relative_to(dataset_root)),
+                                    "iso_001_reg": str(iso_single_path.relative_to(dataset_root)),
+                                    f"aniso_{1:03d}": str(aniso_path.relative_to(dataset_root)),
                                 }
 
                                 # build signals entries (minimal set from existing labels)
@@ -1745,8 +1791,8 @@ def generate_dataset(
                                         "random_seed": int(sample_seed),
                                     },
                                     "paths": {
-                                        "mesh": str(mesh_path),
-                                        "label": str(final_labels_path),
+                                        "mesh": str(mesh_path.relative_to(root_path)),
+                                        "label": str(final_labels_path.relative_to(root_path)),
                                     },
                                     "mesh": {
                                         "n_vertices": n_vertices,
@@ -1843,17 +1889,18 @@ def generate_dataset(
                                 traceback_text=traceback.format_exc(),
                             )
 
-                    _update_sample_label(
-                        paths["labels"],
-                        {
-                            "parametrization": {
-                                "method": effective_param_method,
-                                "success": bool(param_success),
-                                "error": param_error,
-                            },
-                            "sphere_path": paths.get("sphere"),
+                    label_updates: Dict[str, Any] = {
+                        "parametrization": {
+                            "method": effective_param_method,
+                            "success": bool(param_success),
+                            "error": param_error,
                         },
-                    )
+                        "sphere_path": paths.get("sphere"),
+                    }
+                    if paths.get("sphere"):
+                        label_updates["paths"] = {"sphere": paths["sphere"]}
+
+                    _update_sample_label(paths["labels"], label_updates)
 
                     ok, issues = validate_saved_sample(paths["labels"])
                     if not ok:

@@ -84,7 +84,8 @@ def load_signal(
     input_dir: Path, 
     sample_name: str, 
     mesh: trimesh.Trimesh, 
-    signal_type: str = "auto"
+    signal_type: str = "auto",
+    label_data: dict = None
 ) -> tuple[np.ndarray, str]:
     """Load signal from disk.
     
@@ -101,6 +102,8 @@ def load_signal(
         - 'iso': Load iso_000 signal
         - 'aniso': Load aniso_000 signal
         - 'auto': Try iso_000 first, fall back to aniso_000, then to single signal (backward compat)
+    label_data : dict, optional
+        Loaded label JSON data. If provided and contains signal_files, will use those paths.
     
     Returns
     -------
@@ -109,28 +112,67 @@ def load_signal(
     """
     signal_path = None
     
-    if signal_type == "iso":
-        signal_path = input_dir / "signals" / f"{sample_name}_iso_000.npy"
-        if not signal_path.is_file():
-            raise FileNotFoundError(f"isotropic signal file not found for {sample_name}: {signal_path}")
+    # Try loading from signal_files if available (new schema with relative paths)
+    if label_data and "signal_files" in label_data:
+        signal_files = label_data.get("signal_files", {})
+        
+        if signal_type == "iso":
+            # Try iso_{N:03d} first (with N centers), then iso_001_cls
+            for key in signal_files:
+                if key.startswith("iso_") and not key.endswith("_cls") and not key.endswith("_reg"):
+                    rel_path = signal_files[key]
+                    signal_path = input_dir / rel_path
+                    if signal_path.is_file():
+                        break
+            # If not found, try iso_001_cls
+            if not signal_path or not signal_path.is_file():
+                if "iso_001_cls" in signal_files:
+                    rel_path = signal_files["iso_001_cls"]
+                    signal_path = input_dir / rel_path
+        
+        elif signal_type == "aniso":
+            if "aniso_001" in signal_files:
+                rel_path = signal_files["aniso_001"]
+                signal_path = input_dir / rel_path
+        
+        else:  # auto
+            # Try iso first (any iso_* key)
+            for key in signal_files:
+                if key.startswith("iso_") and not key.endswith("_cls") and not key.endswith("_reg"):
+                    rel_path = signal_files[key]
+                    signal_path = input_dir / rel_path
+                    if signal_path.is_file():
+                        break
+            # If not found, try aniso
+            if not signal_path or not signal_path.is_file():
+                if "aniso_001" in signal_files:
+                    rel_path = signal_files["aniso_001"]
+                    signal_path = input_dir / rel_path
     
-    elif signal_type == "aniso":
-        signal_path = input_dir / "signals" / f"{sample_name}_aniso_000.npy"
-        if not signal_path.is_file():
-            raise FileNotFoundError(f"anisotropic signal file not found for {sample_name}: {signal_path}")
-    
-    else:  # auto
-        # Try iso_000 first
-        signal_path = input_dir / "signals" / f"{sample_name}_iso_000.npy"
-        if not signal_path.is_file():
-            # Try aniso_000
+    # Fall back to old naming scheme if not found
+    if not signal_path or not signal_path.is_file():
+        if signal_type == "iso":
+            signal_path = input_dir / "signals" / f"{sample_name}_iso_000.npy"
+            if not signal_path.is_file():
+                raise FileNotFoundError(f"isotropic signal file not found for {sample_name}: {signal_path}")
+        
+        elif signal_type == "aniso":
             signal_path = input_dir / "signals" / f"{sample_name}_aniso_000.npy"
             if not signal_path.is_file():
-                # Fall back to original naming for backward compatibility
-                signal_path = input_dir / "signals" / f"{sample_name}.npy"
+                raise FileNotFoundError(f"anisotropic signal file not found for {sample_name}: {signal_path}")
         
-        if not signal_path.is_file():
-            raise FileNotFoundError(f"signal file not found for {sample_name}")
+        else:  # auto
+            # Try iso_000 first
+            signal_path = input_dir / "signals" / f"{sample_name}_iso_000.npy"
+            if not signal_path.is_file():
+                # Try aniso_000
+                signal_path = input_dir / "signals" / f"{sample_name}_aniso_000.npy"
+                if not signal_path.is_file():
+                    # Fall back to original naming for backward compatibility
+                    signal_path = input_dir / "signals" / f"{sample_name}.npy"
+            
+            if not signal_path.is_file():
+                raise FileNotFoundError(f"signal file not found for {sample_name}")
 
     signal = np.load(signal_path)
     if signal.shape[0] != len(mesh.vertices):
@@ -225,17 +267,23 @@ def main() -> None:
     for sample_name in sample_names:
         label_path = labels_dir / f"{sample_name}.json"
         mesh_path = meshes_dir / f"{sample_name}.obj"
+        
+        # Load label data
+        with open(label_path) as fh:
+            label_data = json.load(fh)
+        
         if not mesh_path.is_file():
-            with open(label_path) as fh:
-                label_data = json.load(fh)
             mesh_path = Path(label_data.get("mesh_file", mesh_path))
+            # Handle relative mesh paths
+            if not mesh_path.is_absolute():
+                mesh_path = input_dir / mesh_path
 
         if not mesh_path.is_file():
             print(f"Skipping {sample_name}: mesh file not found")
             continue
 
         mesh = trimesh.load_mesh(mesh_path)
-        signal, signal_source = load_signal(input_dir, sample_name, mesh, signal_type=args.signal_type)
+        signal, signal_source = load_signal(input_dir, sample_name, mesh, signal_type=args.signal_type, label_data=label_data)
         plot_sample_names = f"par_{sample_name}" if args.use_spheres else sample_name
         plot_sample(
             mesh=mesh,
