@@ -4,3 +4,4 @@ trimesh
 pyglet
 nibabel
 meshio
+scikit-learn

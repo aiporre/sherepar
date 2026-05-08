@@ -101,6 +101,10 @@ except ImportError:
     _graphop = None  # type: ignore[assignment]
     _GRAPHOP_AVAILABLE = False
 
+# Cached MNIST images (loaded on demand)
+_MNIST_IMAGES: Optional[np.ndarray] = None
+_MNIST_LABELS: Optional[np.ndarray] = None
+
 
 DEFORMATION_CASES: Dict[str, Dict[str, Any]] = {
     "case1_no": {
@@ -782,73 +786,153 @@ def save_sample_signal(
     sigmas: List[float] = []
     amplitudes: List[float] = []
     if signal_type is not None:
-        if signal_factory is None:
-            raise ValueError("signal_factory is required when signal_type is not None")
         if rng is None:
             rng = np.random.default_rng()
-        if signal_num_centers <= 0:
-            raise ValueError("signal_num_centers must be positive")
 
-        # Allow caller to provide explicit vertex centers (used when matching signals)
-        if signal_centers is not None:
-            signal_centers = [int(idx) for idx in signal_centers]
-        else:
-            signal_center_idx = rng.integers(0, len(mesh.vertices), size=signal_num_centers)
-            signal_centers = [int(idx) for idx in np.atleast_1d(signal_center_idx)]
+        # Special-case: MNIST projection does not depend on signal_factory
+        if signal_type == "mnist":
+            # Lazy-load MNIST images via scikit-learn's fetch_openml
+            global _MNIST_IMAGES, _MNIST_LABELS
+            try:
+                if _MNIST_IMAGES is None:
+                    from sklearn.datasets import fetch_openml
 
-        signal_centers_coords = [np.asarray(mesh.vertices[idx], dtype=float).tolist() for idx in signal_centers]
-        signal_center_ids = signal_centers
-        if signal_sigma_values is None:
-            sigmas = [float(signal_sigma)] * signal_num_centers
-        else:
-            sigmas = [float(v) for v in signal_sigma_values]
-        if signal_amplitude_values is None:
-            amplitudes = [float(signal_amplitude)] * signal_num_centers
-        else:
-            amplitudes = [float(v) for v in signal_amplitude_values]
-        if signal_type == "isotropic":
-            signal_params: Dict[str, Any] = {
-                "centers": signal_centers,
-                "sigmas": sigmas,  # Now pass the list of sigmas per center
-                "amplitudes": amplitudes,  # Pass per-center amplitudes
+                    mn = fetch_openml("mnist_784", version=1, as_frame=False)
+                    data = np.asarray(mn["data"], dtype=np.float32)
+                    targets = np.asarray(mn.get("target"), dtype=np.int32) if mn.get("target") is not None else None
+                    # reshape to (N, 28, 28)
+                    data = data.reshape(-1, 28, 28)
+                    # normalize to [0, 1]
+                    if data.max() > 1.0:
+                        data = data / 255.0
+                    _MNIST_IMAGES = data
+                    _MNIST_LABELS = targets
+            except Exception as exc:  # pragma: no cover - fetching may fail in offline env
+                raise RuntimeError(f"Failed to load MNIST dataset: {exc}")
+
+            imgs = _MNIST_IMAGES
+            labels = _MNIST_LABELS
+            if imgs is None:
+                raise RuntimeError("MNIST images not available")
+
+            # pick a random MNIST image for this sample
+            idx = int(rng.integers(0, imgs.shape[0]))
+            img = imgs[idx]
+            img_h, img_w = img.shape
+
+            # Map mesh vertices to spherical coordinates (from mesh center of mass)
+            verts = np.asarray(mesh.vertices, dtype=float)
+            center = np.array(mesh.center_mass, dtype=float)
+            dirs = verts - center
+            norms = np.linalg.norm(dirs, axis=1)
+            norms[norms <= 0] = 1e-8
+            dirs = dirs / norms[:, None]
+            x = dirs[:, 0]
+            y = dirs[:, 1]
+            z = dirs[:, 2]
+            theta = np.arccos(np.clip(z, -1.0, 1.0))  # 0..pi
+            phi = np.arctan2(y, x)  # -pi..pi
+            phi[phi < 0] += 2.0 * np.pi  # 0..2pi
+
+            u = (phi / (2.0 * np.pi)) * (img_w - 1)
+            v = (theta / np.pi) * (img_h - 1)
+
+            ui = np.clip(np.round(u).astype(int), 0, img_w - 1)
+            vi = np.clip(np.round(v).astype(int), 0, img_h - 1)
+
+            intensities = img[vi, ui].astype(np.float32)
+            # already normalized earlier to [0,1]
+            signal_arr = (intensities * float(signal_amplitude)).astype(np.float32)
+
+            # Save signal array
+            save_path = signal_dir / f"{name}_mnist.npy"
+            np.save(str(save_path), signal_arr)
+            signal_path = str(save_path)
+
+            signal_info = {
+                "signal_type": "mnist",
+                "mnist_index": int(idx),
+                "mnist_label": int(labels[idx]) if labels is not None else None,
+                "signal_file": _to_relative_dataset_path(str(save_path), root_path),
+                "num_centers": 0,
+                "centers": [],
+                "center_vertex_ids": [],
+                "sigmas": [],
+                "amplitudes": [],
             }
+            meta["signal"] = signal_info
+            # Adjust local variables used later when writing labels/tasks
+            signal_num_centers = 0
+            signal_centers_coords = []
+            signal_center_ids = []
+            sigmas = []
+            amplitudes = []
         else:
-            # For anisotropic: use sigma_u and sigma_v (where sigma_v = 0.5 * sigma_u)
-            # and randomized orientation angle
-            sigma_u = sigmas[0]
-            sigma_v = max(sigma_u * 0.5, 1e-6)
-            orientation_angle = signal_orientation_values[0] if signal_orientation_values else 0.0
-            signal_params = {
-                "center": signal_centers[0],
-                "sigma_u": sigma_u,
-                "sigma_v": sigma_v,
-                "amplitude": amplitudes[0],
-                "orientation_angle": orientation_angle
-            }
+            if signal_factory is None:
+                raise ValueError("signal_factory is required when signal_type is not None and not 'mnist'")
+            if signal_num_centers <= 0:
+                raise ValueError("signal_num_centers must be positive")
 
-        surface = Surface(
-            vertices=np.asarray(mesh.vertices, dtype=np.float64),
-            faces=np.asarray(mesh.faces, dtype=np.int32),
-            deform_meta=_json_safe(meta.get("deform_meta", {})),
-            root=root,
-            fname=name,
-        )
-        surface = signal_factory.compute_signal(surface, signal_type, signal_params)
-        signal_paths = surface.save_only_signal()
-        signal_path = signal_paths["signal"]
-        signal_info = {
-            "signal_type": signal_type,
-            "signal_params": _json_safe(signal_params),
-            "signal_meta": _json_safe(surface.signal_meta),
-            "signal_file": _to_relative_dataset_path(signal_paths["signal"], root_path),
-            "signal_label_file": _to_relative_dataset_path(signal_paths["signal_label"], root_path),
-            "num_centers": int(signal_num_centers),
-            "centers": signal_centers_coords,
-            "center_vertex_ids": signal_center_ids,
-            "sigmas": sigmas,
-            "amplitudes": amplitudes,
-        }
-        meta["signal"] = signal_info
+            # Allow caller to provide explicit vertex centers (used when matching signals)
+            if signal_centers is not None:
+                signal_centers = [int(idx) for idx in signal_centers]
+            else:
+                signal_center_idx = rng.integers(0, len(mesh.vertices), size=signal_num_centers)
+                signal_centers = [int(idx) for idx in np.atleast_1d(signal_center_idx)]
+
+            signal_centers_coords = [np.asarray(mesh.vertices[idx], dtype=float).tolist() for idx in signal_centers]
+            signal_center_ids = signal_centers
+            if signal_sigma_values is None:
+                sigmas = [float(signal_sigma)] * signal_num_centers
+            else:
+                sigmas = [float(v) for v in signal_sigma_values]
+            if signal_amplitude_values is None:
+                amplitudes = [float(signal_amplitude)] * signal_num_centers
+            else:
+                amplitudes = [float(v) for v in signal_amplitude_values]
+            if signal_type == "isotropic":
+                signal_params: Dict[str, Any] = {
+                    "centers": signal_centers,
+                    "sigmas": sigmas,  # Now pass the list of sigmas per center
+                    "amplitudes": amplitudes,  # Pass per-center amplitudes
+                }
+            else:
+                # For anisotropic: use sigma_u and sigma_v (where sigma_v = 0.5 * sigma_u)
+                # and randomized orientation angle
+                sigma_u = sigmas[0]
+                sigma_v = max(sigma_u * 0.5, 1e-6)
+                orientation_angle = signal_orientation_values[0] if signal_orientation_values else 0.0
+                signal_params = {
+                    "center": signal_centers[0],
+                    "sigma_u": sigma_u,
+                    "sigma_v": sigma_v,
+                    "amplitude": amplitudes[0],
+                    "orientation_angle": orientation_angle
+                }
+
+            surface = Surface(
+                vertices=np.asarray(mesh.vertices, dtype=np.float64),
+                faces=np.asarray(mesh.faces, dtype=np.int32),
+                deform_meta=_json_safe(meta.get("deform_meta", {})),
+                root=root,
+                fname=name,
+            )
+            surface = signal_factory.compute_signal(surface, signal_type, signal_params)
+            signal_paths = surface.save_only_signal()
+            signal_path = signal_paths["signal"]
+            signal_info = {
+                "signal_type": signal_type,
+                "signal_params": _json_safe(signal_params),
+                "signal_meta": _json_safe(surface.signal_meta),
+                "signal_file": _to_relative_dataset_path(signal_paths["signal"], root_path),
+                "signal_label_file": _to_relative_dataset_path(signal_paths["signal_label"], root_path),
+                "num_centers": int(signal_num_centers),
+                "centers": signal_centers_coords,
+                "center_vertex_ids": signal_center_ids,
+                "sigmas": sigmas,
+                "amplitudes": amplitudes,
+            }
+            meta["signal"] = signal_info
 
     # Write JSON metadata
     mesh_path_rel = str(mesh_path.relative_to(root_path))
@@ -1239,8 +1323,8 @@ def generate_dataset(
         raise ValueError("signal_sigma must be positive")
     if signal_num_centers <= 0:
         raise ValueError("signal_num_centers must be positive")
-    if signal_type not in (None, "isotropic", "anisotropic"):
-        raise ValueError("signal_type must be one of None, 'isotropic', or 'anisotropic'")
+    if signal_type not in (None, "isotropic", "anisotropic", "mnist"):
+        raise ValueError("signal_type must be one of None, 'isotropic', 'anisotropic', or 'mnist'")
     if signal_type is None:
         raise ValueError("signal_type cannot be None for this dataset pipeline; each sample must include a signal.")
     if param_method not in (None, "flash", "cem"):
@@ -1547,8 +1631,9 @@ def generate_dataset(
 
                     try:
                         # If a signal is requested, generate both isotropic and anisotropic
-                        # DevNote: the signal_type variable is used as flag, this is antipattern
-                        if signal_type is not None:
+                        # For legacy behavior we create both iso/aniso when signal_type is isotropic/anisotropic.
+                        # If signal_type == 'mnist' we skip the dual-generation and call save_sample_signal once below.
+                        if signal_type is not None and signal_type != "mnist":
                             # Create two factories (one per signal family)
                             signal_factory_iso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
                             signal_factory_aniso = SurfaceFactory(root=output_root, template_mesh_path=tmp_path)
@@ -2004,7 +2089,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-iter", type=int, default=50, help="Maximum ARAP iterations.")
     parser.add_argument(
         "--signal-type",
-        choices=("isotropic", "anisotropic"),
+        choices=("isotropic", "anisotropic", "mnist"),
         default="isotropic",
         help="Synthetic signal family attached after deformation.",
     )
