@@ -152,6 +152,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,
         offset_sample_counter=0,
+        mnist_percentage=args.mnist_percentage if hasattr(args, 'mnist_percentage') else 100.0,
+        mnist_total_count=args.mnist_total_count if hasattr(args, 'mnist_total_count') else None,
     )
 
 

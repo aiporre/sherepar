@@ -862,6 +862,8 @@ def save_sample_signal(
                 "amplitudes": [],
             }
             meta["signal"] = signal_info
+            # Store MNIST label for later use in tasks section
+            meta["mnist_digit_label"] = int(labels[idx]) if labels is not None else None
             # Adjust local variables used later when writing labels/tasks
             signal_num_centers = 0
             signal_centers_coords = []
@@ -978,6 +980,14 @@ def save_sample_signal(
         "sigma_regression": {"valid": num_centers == 1, "label": label["signal"]["sigmas"][0] if num_centers == 1 else None},
         "amplitude_regression": {"valid": num_centers == 1, "label": label["signal"]["amplitudes"][0] if num_centers == 1 else None},
     }
+    
+    # Add MNIST classification task if present
+    if "mnist_digit_label" in meta:
+        mnist_label = meta["mnist_digit_label"]
+        label["tasks"]["mnist_cls"] = {
+            "valid": mnist_label is not None and 0 <= mnist_label < 10,
+            "label": mnist_label
+        }
     with open(labels_path, "w") as fh:
         json.dump(label, fh, indent=2)
 
@@ -1264,6 +1274,8 @@ def generate_dataset(
         split_seed: int = 0,
         group_by_template: bool = True,
         offset_sample_counter: int = 0,
+        mnist_percentage: float = 100.0,
+        mnist_total_count: Optional[int] = None,
 
 ) -> int:
     """Run the full dataset generation pipeline.
@@ -1276,42 +1288,13 @@ def generate_dataset(
         Root directory for generated output.
     n_samples_per_mesh:
         Number of deformation samples to attempt per input mesh.
-    patch_radius_ratio:
-        ROI patch radius as a fraction of the mesh bounding-box diagonal.
-    smoothing_iterations:
-        Humphrey smoothing passes applied after deformation.
-    group_candidates:
-        Number of sampled handle vertices grouped into each deformation call.
-    roi_vertex_ratio:
-        ROI-growth stop criterion expressed as a fraction of the mesh vertex
-        count.
-    max_ratio:
-        Maximum displacement as a fraction of dist(handle, center_of_mass).
-    ring_size:
-        Euclidean translation ring radius passed to graphop.deform_surface.
-    deform_method:
-        graphop deformation algorithm ('sre_arap', 'original_arap',
-        'spokes_and_rims').
-    alpha:
-        SRE-ARAP smoothness weight.
-    max_iter:
-        Maximum ARAP iterations.
-    seed:
-        Random seed for reproducibility.
-    repair_holes:
-        Whether to attempt hole repair on meshes that are not watertight.
-    drop_non_watertight:
-        Whether to discard deformations that are not watertight after
-        smoothing/validation.
     signal_type:
         Synthetic signal family attached after deformation. ``None`` disables
         signal generation. The default is ``"isotropic"``.
-    signal_sigma:
-        Width parameter used for the default isotropic Gaussian signal.
-    signal_amplitude:
-        Amplitude used for the default isotropic Gaussian signal.
-    signal_num_centers:
-        Number of centers used for isotropic signal generation.
+    mnist_percentage:
+        Percentage of MNIST dataset to use (0.1-100.0). Only applies when signal_type is 'mnist'.
+    mnist_total_count:
+        Explicit total count of MNIST samples. Overrides mnist_percentage if provided.
     Returns
     -----
     total_saved: int
@@ -1336,6 +1319,16 @@ def generate_dataset(
         raise ValueError("signal_type cannot be None for this dataset pipeline; each sample must include a signal.")
     if param_method not in (None, "flash", "cem"):
         raise ValueError("param_method must be one of None, 'flash', or 'cem'")
+    
+    # MNIST-specific validation
+    if signal_type == "mnist":
+        if not (0.1 <= mnist_percentage <= 100.0):
+            raise ValueError(f"mnist_percentage must be in range [0.1, 100.0], got {mnist_percentage}")
+        # Force MNIST to case1_no and disable splits
+        deformation_cases = ["case1_no"]
+        create_splits = False
+        param_method = None
+    
     if deformation_cases is None:
         deformation_cases = ["case2_small", "case3_large"]
     for case_name in deformation_cases:
@@ -1353,6 +1346,13 @@ def generate_dataset(
         print("No .obj files found or all failed to load.")
         return 0
     print(f"  Loaded {len(mesh_pairs)} mesh(es)")
+    
+    # MNIST requires exactly one template mesh
+    if signal_type == "mnist" and len(mesh_pairs) != 1:
+        raise ValueError(
+            f"MNIST dataset generation requires exactly one template mesh, "
+            f"but {len(mesh_pairs)} meshes were found. Please provide a single mesh."
+        )
 
     total_saved = 0
     total_failed = 0
@@ -1365,9 +1365,22 @@ def generate_dataset(
     if not signal_centers_options:
         raise ValueError("signal_centers_options must contain at least one positive integer")
     
-    # Fix sample count logic: n_samples_per_mesh is per center option
-    # Total samples = n_samples_per_mesh * len(signal_centers_options) * len(deformation_cases)
-    samples_per_center_and_case = n_samples_per_mesh
+    # MNIST sample count override and configuration
+    if signal_type == "mnist":
+        # Calculate total MNIST samples from percentage or explicit count
+        total_mnist_count = 70000  # Full MNIST dataset size
+        if mnist_total_count is not None:
+            samples_per_center_and_case = mnist_total_count
+        else:
+            samples_per_center_and_case = int((mnist_percentage / 100.0) * total_mnist_count)
+        signal_centers_options = [1]  # Force single center for MNIST
+        deformation_cases = ["case1_no"]  # Force no deformation for MNIST
+        create_splits = False  # Disable splits for MNIST
+    else:
+        # Fix sample count logic: n_samples_per_mesh is per center option
+        # Total samples = n_samples_per_mesh * len(signal_centers_options) * len(deformation_cases)
+        samples_per_center_and_case = n_samples_per_mesh
+    
     total_samples_plan = samples_per_center_and_case * len(signal_centers_options) * len(deformation_cases)
 
     for mesh_name, template_mesh in mesh_pairs:
@@ -2107,6 +2120,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter for isotropic signals.")
     parser.add_argument("--signal-sigma-ani", type=float, default=0.8, help="Signal width parameter for anisotropic signals.")
     parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
+    parser.add_argument(
+        "--mnist-percentage",
+        type=float,
+        default=100.0,
+        help="Percentage of MNIST dataset to use (0.1-100.0). Only applies when --signal-type mnist. Default: 100%% (all 70,000 images).",
+    )
+    parser.add_argument(
+        "--mnist-total-count",
+        type=int,
+        default=None,
+        help="Explicit total count of MNIST samples to generate. Overrides --mnist-percentage if provided.",
+    )
     parser.add_argument("--signal-num-centers", type=int, default=1, help="Maximum number of signal centers (used when --signal-centers-options is not provided).")
     parser.add_argument(
         "--signal-centers-options",
