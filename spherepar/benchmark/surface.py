@@ -58,10 +58,14 @@ def _load_graphop_extension():
             spec = importlib.util.spec_from_file_location("graphop", ext_path)
             if spec is None or spec.loader is None:
                 continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            if hasattr(module, "deform_surface"):
-                return module
+            try:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, "deform_surface"):
+                    return module
+            except Exception:
+                # Skip incompatible .so files (e.g., Python version mismatch)
+                continue
 
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))

@@ -80,10 +80,14 @@ def _load_graphop_extension():
             spec = importlib.util.spec_from_file_location("graphop", ext_path)
             if spec is None or spec.loader is None:
                 continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            if hasattr(module, "deform_surface"):
-                return module
+            try:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, "deform_surface"):
+                    return module
+            except Exception as e:
+                # Skip incompatible .so files (e.g., Python version mismatch)
+                continue
 
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
@@ -770,11 +774,8 @@ def save_sample_signal(
     mesh_path = meshes_dir / f"{name}.obj"
     labels_path = labels_dir / f"{name}.json"
 
-    # # Write OBJ
-    # DEVNOTE: we save the mesh after signal generation,
-    #  since some signal types may modify vertex positions
-    #  (e.g. anisotropic Gaussian with orientation based on local geometry)
-    # mesh.export(str(mesh_path))
+    # Write OBJ mesh
+    mesh.export(str(mesh_path))
 
     # Write signal arrays
     # create a surface without signal
@@ -1127,11 +1128,10 @@ def validate_saved_sample(
     
     # Validate signals
     signal_paths = []
+    label_file = Path(label_path)
+    dataset_root = label_file.parent.parent  # labels/ -> dataset_root
+    
     if has_new_schema:
-        # Extract dataset_root from label_path for resolving relative paths
-        label_file = Path(label_path)
-        dataset_root = label_file.parent.parent  # labels/ -> dataset_root
-        
         # Convert relative paths to absolute paths
         for rel_path in label.get("signal_files", {}).values():
             if rel_path:
@@ -1141,7 +1141,14 @@ def validate_saved_sample(
                 else:
                     signal_paths.append(dataset_root / path)  # Make absolute relative to dataset_root
     else:
-        signal_paths = [Path(label.get("signal_path", ""))] if label.get("signal_path") else []
+        # Old schema: signal_path is relative, resolve it
+        signal_path = label.get("signal_path", "")
+        if signal_path:
+            path = Path(signal_path)
+            if path.is_absolute():
+                signal_paths.append(path)  # Already absolute
+            else:
+                signal_paths.append(dataset_root / path)  # Make absolute relative to dataset_root
     
     for signal_path in signal_paths:
         if not signal_path.exists():
@@ -1661,7 +1668,9 @@ def generate_dataset(
                                 with open(paths_iso["labels"], "r") as fh:
                                     label_iso = json.load(fh)
                                 iso_center_ids = label_iso.get("signal", {}).get("center_vertex_ids")
-                            except Exception:
+                            except Exception as exc:
+                                print(f"WARNING: Failed to read isotropic signal centers: {exc}")
+                                traceback.print_exc()
                                 iso_center_ids = None
 
                             # Create a single-center isotropic signal for regression (iso_001).
@@ -1716,8 +1725,10 @@ def generate_dataset(
                                     label_iso = json.load(fh)
                                 with open(paths_iso_single["labels"], "r") as fh:
                                     label_iso_single = json.load(fh)
-                            except Exception:
+                            except Exception as exc:
                                 # If reading failed, fall back to returning anisotropic paths
+                                print(f"ERROR: Failed to merge label JSONs: {exc}")
+                                traceback.print_exc()
                                 paths = paths_aniso
                             else:
                                 n_vertices = int(label_aniso.get("n_vertices", len(deformed.vertices)))

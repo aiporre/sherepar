@@ -99,3 +99,80 @@ CMake suite maintained and supported by Kitware (kitware.com/cmake).
 # need also rtree
 pip install rtree
 ```
+
+# Data generation
+
+## MNIST
+
+The `generate_mnist.py` script creates a synthetic dataset of 2D shapes based on the MNIST digit dataset. It generates deformed versions of the digit '0' and saves them as OBJ files along with corresponding signal data.
+
+
+How to use script_to_generate_dataset.py to create MNIST dataset
+
+Basic Command Structure:
+```bash
+ cd /path/to/spherepar
+ python examples/script_to_generate_dataset.py \
+     --input-dir data/meshes \
+     --output-root data/generated_mnist \
+     --signal-type mnist \
+     --n-samples-per-mesh 9 \
+     --seed 41
+```
+
+
+MNIST-Specific Parameters:
+
+ --signal-type mnist
+     Use MNIST images instead of synthetic Gaussian signals
+
+ --signal-amplitude 1.0
+     Scale factor for MNIST pixel intensities (default 1.0)
+
+ --deformation-cases case1_no
+     Optional: skip deformations, only generate signals on original mesh
+     (remove to generate both cases)
+
+Example Usage:
+
+Option 1: Generate MNIST signals with deformations
+```bash
+
+ python examples/script_to_generate_dataset.py \
+     --input-dir data/ \
+     --output-root data/generated_mnist \
+     --signal-type mnist \
+     --n-samples-per-mesh 5 \
+     --seed 42 \
+     --deformation-cases case2_small,case3_large
+```
+
+Option 2: Generate MNIST signals without deformations (original meshes only)
+
+```bash
+ python examples/script_to_generate_dataset.py \
+     --input-dir data/ \
+     --output-root data/generated_mnist_no_deform \
+     --signal-type mnist \
+     --n-samples-per-mesh 1 \
+     --deformation-cases case1_no \
+     --seed 42
+```
+
+Output Structure:
+```
+ data/generated_mnist/
+     meshes/          — mesh OBJ files
+     signals/         — *_mnist.npy files (MNIST projected onto vertices)
+     labels/          — JSON metadata (includes mnist_index, mnist_label)
+     spheres/         — spherical parametrization OBJ files
+     logs/            — errors.log
+```
+
+
+Key Points:
+
+ - MNIST images downloaded automatically via scikit-learn's fetch_openml()
+ - Spherical projection: MNIST pixel → vertex via theta/phi angles
+ - Each sample includes: original mesh index, MNIST digit label (0-9)
+ - No signal_sigma/signal_num_centers needed for MNIST (ignored automatically)

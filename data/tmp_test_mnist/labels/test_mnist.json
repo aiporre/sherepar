@@ -1,0 +1,63 @@
+{
+  "sample_id": "test_mnist",
+  "name": "test_mnist",
+  "template_id": "tpl",
+  "deformation_case": "case1_no",
+  "mesh_file": "meshes/test_mnist.obj",
+  "mesh_path": "meshes/test_mnist.obj",
+  "signal_file": "data/tmp_test_mnist/signals/test_mnist_mnist.npy",
+  "signal_path": "data/tmp_test_mnist/signals/test_mnist_mnist.npy",
+  "sphere_path": "spheres/test_mnist.obj",
+  "label_path": "labels/test_mnist.json",
+  "n_vertices": 162,
+  "n_faces": 320,
+  "distance_stats": {
+    "mean_distance": 0.0,
+    "std_distance": 0.0
+  },
+  "signal": {
+    "num_centers": 0,
+    "centers": [],
+    "center_vertex_ids": [],
+    "sigmas": [],
+    "amplitudes": [],
+    "family": "mnist"
+  },
+  "deformation": {
+    "signal": {
+      "signal_type": "mnist",
+      "mnist_index": 59543,
+      "mnist_label": 4,
+      "signal_file": "data/tmp_test_mnist/signals/test_mnist_mnist.npy",
+      "num_centers": 0,
+      "centers": [],
+      "center_vertex_ids": [],
+      "sigmas": [],
+      "amplitudes": []
+    }
+  },
+  "parametrization": {
+    "method": null,
+    "success": false
+  },
+  "random_seed": 0,
+  "warnings": [],
+  "tasks": {
+    "number_of_centers": {
+      "valid": false,
+      "label": 0
+    },
+    "center_regression": {
+      "valid": false,
+      "label": null
+    },
+    "sigma_regression": {
+      "valid": false,
+      "label": null
+    },
+    "amplitude_regression": {
+      "valid": false,
+      "label": null
+    }
+  }
+}

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import trimesh
-
+from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -221,7 +221,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Overwrite       : {args.overwrite}")
     print("=" * 68)
 
-    for idx, mesh_src_path in enumerate(mesh_files, start=1):
+    for idx, mesh_src_path in tqdm(enumerate(mesh_files, start=1), total=len(mesh_files), desc="Creating dataset", unit="meshes"):
         sample_name = mesh_src_path.stem
         label_path = output_dirs["labels"] / f"{sample_name}.json"
         signal_path = output_dirs["signals"] / f"{sample_name}.npy"
