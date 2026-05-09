@@ -1375,7 +1375,6 @@ def generate_dataset(
             samples_per_center_and_case = int((mnist_percentage / 100.0) * total_mnist_count)
         signal_centers_options = [1]  # Force single center for MNIST
         deformation_cases = ["case1_no"]  # Force no deformation for MNIST
-        create_splits = False  # Disable splits for MNIST
     else:
         # Fix sample count logic: n_samples_per_mesh is per center option
         # Total samples = n_samples_per_mesh * len(signal_centers_options) * len(deformation_cases)
