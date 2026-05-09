@@ -1324,9 +1324,8 @@ def generate_dataset(
     if signal_type == "mnist":
         if not (0.1 <= mnist_percentage <= 100.0):
             raise ValueError(f"mnist_percentage must be in range [0.1, 100.0], got {mnist_percentage}")
-        # Force MNIST to case1_no and disable splits
+        # Force MNIST to case1_no
         deformation_cases = ["case1_no"]
-        create_splits = False
         param_method = None
     
     if deformation_cases is None:
