@@ -37,6 +37,8 @@ mesh = trimesh.load_mesh(mesh_file)
 
 print("laoding signal: ", signal_file)
 signal = np.load(signal_file)
+print(">>> vertices shape ", mesh.vertices.shape)
+print(">>> signal shape ", signal.shape)
 
 
 

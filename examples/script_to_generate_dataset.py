@@ -84,6 +84,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Signal type        : {args.signal_type}")
     print(f"  Signal sigma       : {args.signal_sigma}")
     print(f"  Signal sigma ani   : {args.signal_sigma_ani}")
+    print(f"  Signal sigma var % : {args.signal_sigma_variation}")
+    print(f"  Signal amp var %   : {args.signal_amplitude_variation}")
     print(f"  Signal amplitude   : {args.signal_amplitude}")
     print(f"  Signal centers     : {args.signal_num_centers}")
     print(f"  Alpha              : {args.alpha}")
@@ -132,6 +134,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         max_iter=args.max_iter,
         signal_sigma=args.signal_sigma,
         signal_sigma_ani=args.signal_sigma_ani,
+        signal_sigma_variation_percent=args.signal_sigma_variation,
+        signal_amplitude_variation_percent=args.signal_amplitude_variation,
         signal_amplitude=args.signal_amplitude,
         signal_num_centers=args.signal_num_centers,
         signal_centers_options=signal_centers_options,

@@ -75,7 +75,7 @@ def iter_sample_names(labels_dir: Path) -> Iterable[str]:
         stem = label_path.stem
         if stem.endswith("_signal"):
             continue
-        if stem.endswith("_iso_000") or stem.endswith("_aniso_000"):
+        if "_iso_" in stem or "_aniso_" in stem:
             continue
         yield stem
 
@@ -282,7 +282,7 @@ def main() -> None:
             print(f"Skipping {sample_name}: mesh file not found")
             continue
 
-        mesh = trimesh.load_mesh(mesh_path)
+        mesh = trimesh.load_mesh(mesh_path, process=False)
         signal, signal_source = load_signal(input_dir, sample_name, mesh, signal_type=args.signal_type, label_data=label_data)
         plot_sample_names = f"par_{sample_name}" if args.use_spheres else sample_name
         plot_sample(

@@ -723,6 +723,7 @@ def save_sample_signal(
         signal_orientation_values: Optional[List[float]] = None,
         signal_centers: Optional[List[int]] = None,
         rng: Optional[np.random.Generator] = None,
+        skip_mesh_save: bool = False,
 ) -> Dict[str, str]:
     """Save a valid dataset sample to disk.
     # TODO: this method is not isolated saving sample it also generating the signal. Method is overloaded! FIX
@@ -775,7 +776,8 @@ def save_sample_signal(
     labels_path = labels_dir / f"{name}.json"
 
     # Write OBJ mesh
-    mesh.export(str(mesh_path))
+    if not skip_mesh_save:
+        mesh.export(str(mesh_path))
 
     # Write signal arrays
     # create a surface without signal
@@ -1672,7 +1674,9 @@ def generate_dataset(
                                                            signal_sigma_values=sigma_list,
                                                            signal_amplitude_values=amplitude_list,
                                                            signal_orientation_values=orientation_list,
-                                                           rng=sample_rng)
+                                                           rng=sample_rng,
+                                                           skip_mesh_save=True)
+
 
                             # Extract centers chosen for isotropic signal to match them for anisotropic
                             try:
@@ -1704,7 +1708,8 @@ def generate_dataset(
                                                                      signal_sigma_values=[sigma_list[0]] if sigma_list else None,
                                                                      signal_amplitude_values=[amplitude_list[0]] if amplitude_list else None,
                                                                      signal_orientation_values=[orientation_list[0]] if orientation_list else None,
-                                                                     rng=sample_rng)
+                                                                     rng=sample_rng,
+                                                                     skip_mesh_save=True)
 
                             # Second: anisotropic with suffix (force single center)
                             paths_aniso = save_sample_signal(root=output_root,
@@ -1726,7 +1731,8 @@ def generate_dataset(
                                                              signal_orientation_values=[
                                                                  orientation_list[0]] if orientation_list else None,
                                                              signal_centers=iso_center_ids,
-                                                             rng=sample_rng)
+                                                             rng=sample_rng,
+                                                             skip_mesh_save=True)
 
                             # Merge label JSONs: prefer anisotropic label as base, then insert both signals
                             try:
@@ -1954,7 +1960,8 @@ def generate_dataset(
                                                        signal_sigma=signal_sigma, signal_amplitude=signal_amplitude,
                                                        signal_num_centers=sample_num_centers,
                                                        signal_sigma_values=sigma_list,
-                                                       signal_amplitude_values=amplitude_list, rng=sample_rng)
+                                                       signal_amplitude_values=amplitude_list, rng=sample_rng,
+                                                       skip_mesh_save=True)
                     except Exception as exc:  # noqa: BLE001
                         append_error_log(
                             log_path,

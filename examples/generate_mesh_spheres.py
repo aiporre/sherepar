@@ -4,6 +4,7 @@ import argparse
 import os
 
 import numpy as np
+from networkx.algorithms.non_randomness import non_randomness
 
 from spherepar.benchmark.spheres_generator import (
     generate_random_ellipsoid_points,
@@ -93,6 +94,13 @@ def parse_args():
         default=42,
         help=("Seed for reproducibility."),
     )
+    parser.add_argument(
+        "--no-random",
+        dest="no_random",
+        action="store_true",
+        help="If set, the same fixed points will be generated for each sphere (no randomness)."
+
+    )
     return parser.parse_args()
 
 
@@ -106,6 +114,12 @@ def main():
     print(f"Number of points per sphere: {args.num_point}")
     print(f"Filename template: {args.file_name_template}")
     print(f"Seed {args.seed}")
+    print(f"Radomeness {args.no_random}")
+
+    # if no radom just one sphere
+    if args.no_random:
+        args.num_spheres = 1
+        print("Randomness disabled: only one sphere will be generated with fixed points.")
 
     # ensure output folder exists
     out_dir = args.output_dir
@@ -138,7 +152,8 @@ def main():
 
         # Generate random points on sphere for this instance
         vertices = generate_random_ellipsoid_points(
-            a=r, b=r, c=r, num_points=args.num_point
+            a=r, b=r, c=r, num_points=args.num_point,
+            no_random=args.no_random
         )
 
         print("Creating watertight mesh using convex hull...")

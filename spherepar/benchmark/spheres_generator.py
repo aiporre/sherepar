@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 from scipy.spatial import Delaunay
 
 
-def generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=100):
+def generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=100, no_random=False):
     """
     Generate random points on an ellipsoid surface using fibonacci sphere algorithm
     with random perturbation.
@@ -26,8 +26,13 @@ def generate_random_ellipsoid_points(a=2, b=1.5, c=1, num_points=100):
     golden_angle = np.pi * (3.0 - np.sqrt(5.0))
 
     # Random perturbation for non-uniform distribution
-    theta = golden_angle * indices + np.random.uniform(-0.3, 0.3, num_points)
-    phi = np.arccos(1 - 2 * indices / num_points) + np.random.uniform(-0.1, 0.1, num_points)
+    if no_random:
+        theta = golden_angle * indices
+        phi = np.arccos(1 - 2 * indices / num_points)
+    else:
+        theta = golden_angle * indices + np.random.uniform(-0.3, 0.3, num_points)
+        phi = np.arccos(1 - 2 * indices / num_points) + np.random.uniform(-0.1, 0.1, num_points)
+
 
     # Clamp phi to valid range
     phi = np.clip(phi, 0, np.pi)
