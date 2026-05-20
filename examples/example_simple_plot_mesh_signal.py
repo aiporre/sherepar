@@ -62,6 +62,7 @@ ax.set_zlim(mesh.vertices[:, 2].min(), mesh.vertices[:, 2].max())
 ax.set_xlabel('X')
 ax.set_ylabel('Y')
 ax.set_zlabel('Z')
+ax.set_aspect('equal')
 ax.set_title('Mesh with Signal Values')
 
 fig.colorbar(poly, ax=ax, label='Signal Value')

@@ -180,7 +180,7 @@ def anisotropic_gaussian(
     u_raw = diff @ e1
     v_raw = diff @ e2
 
-    # Rotate by orientation_angle
+    # Rotate by orientation_angle clockwise in the (u, v) plane
     cos_a = np.cos(orientation_angle)
     sin_a = np.sin(orientation_angle)
     u = cos_a * u_raw + sin_a * v_raw

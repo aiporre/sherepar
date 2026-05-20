@@ -56,7 +56,7 @@ import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import trimesh
@@ -66,6 +66,7 @@ from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.surface import Surface, SurfaceFactory
 from spherepar.spherical_parametrization import compute_spherical_parametrization
 from spherepar.benchmark.splits import build_task_splits, DEFAULT_TASKS
+from spherepar.s2cnn.gendata import get_projection_grid, project_2d_on_sphere
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +705,72 @@ def _to_relative_dataset_path(path_value: Optional[str], dataset_root: Path) -> 
         return str(path)
 
 
+def _roi_patch_for_ratio(
+        vertices: np.ndarray,
+        center: np.ndarray,
+        ratio: float,
+) -> Tuple[float, np.ndarray]:
+    if not (0.0 < ratio <= 1.0):
+        raise ValueError("roi_vertex_ratio must be in the interval (0, 1]")
+    if vertices.size == 0:
+        raise ValueError("vertices must not be empty")
+    n_vertices = vertices.shape[0]
+    target_count = max(1, int(np.ceil(ratio * n_vertices)))
+    distances = np.linalg.norm(vertices - center, axis=1)
+    max_radius = float(distances.max())
+    roi_radius = max_radius
+    roi_indices = np.array([], dtype=np.intp)
+    for r in np.linspace(0.0, max_radius, num=100):
+        _, roi_indices = extract_roi_patch(vertices, center, radius=float(r))
+        if len(roi_indices) >= target_count:
+            roi_radius = float(r)
+            break
+    if len(roi_indices) < target_count:
+        _, roi_indices = extract_roi_patch(vertices, center, radius=max_radius)
+        roi_radius = max_radius
+    return roi_radius, roi_indices
+
+
+def _mesh_vertex_angles(vertices: np.ndarray, center: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Return per-vertex spherical angles (theta, phi) from mesh-centered directions."""
+    dirs = vertices - center
+    norms = np.linalg.norm(dirs, axis=1)
+    norms[norms <= 0] = 1e-8
+    dirs = dirs / norms[:, None]
+    z = dirs[:, 2]
+    theta = np.arccos(np.clip(z, -1.0, 1.0))  # [0, pi]
+    phi = np.arctan2(dirs[:, 1], dirs[:, 0])  # (-pi, pi]
+    phi[phi < 0] += 2.0 * np.pi  # [0, 2pi)
+    return theta, phi
+
+
+def _sample_dh_grid_at_angles(grid_values: np.ndarray, theta: np.ndarray, phi: np.ndarray) -> np.ndarray:
+    """Bilinearly sample a DH grid at spherical angles (theta, phi)."""
+    if grid_values.ndim != 2:
+        raise ValueError(f"grid_values must be 2D, got shape {grid_values.shape}")
+    n_beta, n_alpha = grid_values.shape
+    beta_pos = np.clip(theta * n_beta / np.pi, 0.0, (n_beta - 1) - 1e-8)
+    alpha_pos = (phi % (2.0 * np.pi)) * n_alpha / (2.0 * np.pi)
+
+    b0 = np.floor(beta_pos).astype(np.intp)
+    b1 = np.clip(b0 + 1, 0, n_beta - 1)
+    a0 = np.floor(alpha_pos).astype(np.intp) % n_alpha
+    a1 = (a0 + 1) % n_alpha
+
+    wb = beta_pos - b0
+    wa = alpha_pos - np.floor(alpha_pos)
+
+    v00 = grid_values[b0, a0]
+    v01 = grid_values[b0, a1]
+    v10 = grid_values[b1, a0]
+    v11 = grid_values[b1, a1]
+
+    top = (1.0 - wa) * v00 + wa * v01
+    bottom = (1.0 - wa) * v10 + wa * v11
+    return ((1.0 - wb) * top + wb * bottom).astype(np.float32)
+
+
+
 def save_sample_signal(
         root: str,
         name: str,
@@ -716,12 +783,17 @@ def save_sample_signal(
         signal_factory: Optional[SurfaceFactory] = None,
         signal_type: Optional[str] = None,
         signal_sigma: float = 0.2,
+        signal_sigma_ani: float = 0.8,
+        signal_sigma_u: Optional[float] = None,
+        signal_sigma_v: Optional[float] = None,
+        signal_sigma_ratio: float = 0.5,
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
         signal_sigma_values: Optional[List[float]] = None,
         signal_amplitude_values: Optional[List[float]] = None,
         signal_orientation_values: Optional[List[float]] = None,
         signal_centers: Optional[List[int]] = None,
+        mnist_index: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
         skip_mesh_save: bool = False,
 ) -> Dict[str, str]:
@@ -753,10 +825,20 @@ def save_sample_signal(
         Synthetic signal family. ``None`` disables signal generation.
     signal_sigma:
         Width parameter used for the generated signal.
+    signal_sigma_ani:
+        Base anisotropic sigma (used when signal_sigma_u is not provided).
+    signal_sigma_u:
+        Explicit anisotropic sigma_u (overrides signal_sigma_ani).
+    signal_sigma_v:
+        Explicit anisotropic sigma_v (overrides ratio-based sigma_v).
+    signal_sigma_ratio:
+        Ratio used to compute sigma_v from sigma_u when signal_sigma_v is not provided.
     signal_amplitude:
         Amplitude used for the generated signal.
     signal_num_centers:
         Number of centers used to generate the synthetic signal.
+    mnist_index:
+        Optional fixed MNIST index (used when signal_type is 'mnist').
     rng:
         Random generator used to sample the signal center.
 
@@ -818,33 +900,24 @@ def save_sample_signal(
             if imgs is None:
                 raise RuntimeError("MNIST images not available")
 
-            # pick a random MNIST image for this sample
-            idx = int(rng.integers(0, imgs.shape[0]))
+            if mnist_index is None:
+                idx = int(rng.integers(0, imgs.shape[0]))
+            else:
+                idx = int(mnist_index)
+            if idx < 0 or idx >= imgs.shape[0]:
+                raise ValueError(f"mnist_index {idx} is out of range (0..{imgs.shape[0] - 1})")
             img = imgs[idx]
-            img_h, img_w = img.shape
+            mnist_bandwidth = 30
 
-            # Map mesh vertices to spherical coordinates (from mesh center of mass)
+            # Build S2CNN spherical sample (DH grid), then resample it on mesh points.
+            grid = get_projection_grid(b=mnist_bandwidth)
+            sample = project_2d_on_sphere(np.expand_dims(img, 0), grid)
+            sample_grid = np.asarray(sample[0], dtype=np.float32) / 255.0
+
             verts = np.asarray(mesh.vertices, dtype=float)
             center = np.array(mesh.center_mass, dtype=float)
-            dirs = verts - center
-            norms = np.linalg.norm(dirs, axis=1)
-            norms[norms <= 0] = 1e-8
-            dirs = dirs / norms[:, None]
-            x = dirs[:, 0]
-            y = dirs[:, 1]
-            z = dirs[:, 2]
-            theta = np.arccos(np.clip(z, -1.0, 1.0))  # 0..pi
-            phi = np.arctan2(y, x)  # -pi..pi
-            phi[phi < 0] += 2.0 * np.pi  # 0..2pi
-
-            u = (phi / (2.0 * np.pi)) * (img_w - 1)
-            v = (theta / np.pi) * (img_h - 1)
-
-            ui = np.clip(np.round(u).astype(int), 0, img_w - 1)
-            vi = np.clip(np.round(v).astype(int), 0, img_h - 1)
-
-            intensities = img[vi, ui].astype(np.float32)
-            # already normalized earlier to [0,1]
+            theta, phi = _mesh_vertex_angles(verts, center)
+            intensities = _sample_dh_grid_at_angles(sample_grid, theta, phi)
             signal_arr = (intensities * float(signal_amplitude)).astype(np.float32)
 
             # Save signal array
@@ -856,6 +929,10 @@ def save_sample_signal(
                 "signal_type": "mnist",
                 "mnist_index": int(idx),
                 "mnist_label": int(labels[idx]) if labels is not None else None,
+                "projection_method": "s2cnn_grid_to_mesh",
+                "projection_grid_type": "Driscoll-Healy",
+                "projection_bandwidth": int(mnist_bandwidth),
+                "projection_interpolation": "bilinear",
                 "signal_file": _to_relative_dataset_path(str(save_path), root_path),
                 "num_centers": 0,
                 "centers": [],
@@ -902,11 +979,16 @@ def save_sample_signal(
                     "amplitudes": amplitudes,  # Pass per-center amplitudes
                 }
             else:
-                # For anisotropic: use sigma_u and sigma_v (where sigma_v = 0.5 * sigma_u)
-                # and randomized orientation angle
-                sigma_u = sigmas[0]
-                sigma_v = max(sigma_u * 0.5, 1e-6)
+                # For anisotropic: use sigma_u and sigma_v with CLI-controlled precedence
+                # precedence: explicit signal_sigma_v -> explicit signal_sigma_u -> sigmas[0] or signal_sigma_ani
+                sigma_u = sigmas[0] if sigmas else float(signal_sigma_ani)
+                if signal_sigma_u is not None:
+                    sigma_u = float(signal_sigma_u)
                 orientation_angle = signal_orientation_values[0] if signal_orientation_values else 0.0
+                if signal_sigma_v is not None:
+                    sigma_v = float(signal_sigma_v)
+                else:
+                    sigma_v = max(sigma_u * float(signal_sigma_ratio), 1e-6)
                 signal_params = {
                     "center": signal_centers[0],
                     "sigma_u": sigma_u,
@@ -944,6 +1026,17 @@ def save_sample_signal(
     label_path_rel = str(labels_path.relative_to(root_path))
     signal_path_rel = _to_relative_dataset_path(signal_path, root_path)
     sphere_path_rel = str((root_path / "spheres" / f"{name}.obj").relative_to(root_path))
+    signal_payload: Dict[str, Any] = {
+        "num_centers": int(signal_num_centers) if signal_type is not None else 0,
+        "centers": signal_centers_coords,
+        "center_vertex_ids": signal_center_ids,
+        "sigmas": sigmas,
+        "amplitudes": amplitudes,
+        "family": signal_type,
+    }
+    signal_payload.update(_json_safe(meta.get("signal", {})))
+    signal_payload["family"] = signal_type
+
     label = {
         "sample_id": name,
         "name": name,
@@ -958,14 +1051,7 @@ def save_sample_signal(
         "n_vertices": int(mesh.vertices.shape[0]),
         "n_faces": int(mesh.faces.shape[0]),
         "distance_stats": stats,
-        "signal": {
-            "num_centers": int(signal_num_centers) if signal_type is not None else 0,
-            "centers": signal_centers_coords,
-            "center_vertex_ids": signal_center_ids,
-            "sigmas": sigmas,
-            "amplitudes": amplitudes,
-            "family": signal_type,
-        },
+        "signal": signal_payload,
         "deformation": _json_safe(meta.get("deformation", meta)),
         "parametrization": {
             "method": meta.get("parametrization_method"),
@@ -1257,6 +1343,9 @@ def generate_dataset(
         signal_type: Optional[str] = "isotropic",
         signal_sigma: float = 0.2,
         signal_sigma_ani: float = 0.8,
+        signal_sigma_u: Optional[float] = None,
+        signal_sigma_v: Optional[float] = None,
+        signal_sigma_ratio: float = 0.5,
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
         signal_centers_options: Optional[List[int]] = None,
@@ -1326,6 +1415,8 @@ def generate_dataset(
     if signal_type == "mnist":
         if not (0.1 <= mnist_percentage <= 100.0):
             raise ValueError(f"mnist_percentage must be in range [0.1, 100.0], got {mnist_percentage}")
+        if mnist_total_count is not None and mnist_total_count <= 0:
+            raise ValueError("mnist_total_count must be positive")
         # Force MNIST to case1_no
         deformation_cases = ["case1_no"]
         param_method = None
@@ -1371,6 +1462,10 @@ def generate_dataset(
         # Calculate total MNIST samples from percentage or explicit count
         total_mnist_count = 70000  # Full MNIST dataset size
         if mnist_total_count is not None:
+            if mnist_total_count > total_mnist_count:
+                raise ValueError(
+                    f"mnist_total_count must be <= {total_mnist_count}, got {mnist_total_count}"
+                )
             samples_per_center_and_case = mnist_total_count
         else:
             samples_per_center_and_case = int((mnist_percentage / 100.0) * total_mnist_count)
@@ -1382,6 +1477,13 @@ def generate_dataset(
         samples_per_center_and_case = n_samples_per_mesh
     
     total_samples_plan = samples_per_center_and_case * len(signal_centers_options) * len(deformation_cases)
+    mnist_index_iter: Optional[Iterator[int]] = None
+    if signal_type == "mnist":
+        if total_samples_plan > total_mnist_count:
+            raise ValueError(
+                f"Requested {total_samples_plan} MNIST samples, but dataset has {total_mnist_count} images"
+            )
+        mnist_index_iter = iter(range(total_samples_plan))
 
     for mesh_name, template_mesh in mesh_pairs:
         print(f"\nProcessing: {mesh_name}")
@@ -1581,6 +1683,14 @@ def generate_dataset(
 
                     sample_name = _make_sample_id(sample_idx, template_name=mesh_name)
                     sample_idx += 1
+                    mnist_index: Optional[int] = None
+                    if signal_type == "mnist":
+                        if mnist_index_iter is None:
+                            raise RuntimeError("MNIST indices were not initialized")
+                        try:
+                            mnist_index = next(mnist_index_iter)
+                        except StopIteration as exc:
+                            raise RuntimeError("MNIST index sequence exhausted") from exc
                     
                     # For case1_no, create a temporary file with the original mesh (wasn't created during deformation)
                     if case_name == "case1_no":
@@ -1669,6 +1779,10 @@ def generate_dataset(
                                                            signal_factory=signal_factory_iso,
                                                            signal_type="isotropic",
                                                            signal_sigma=signal_sigma,
+                                                           signal_sigma_ani=signal_sigma_ani,
+                                                           signal_sigma_u=signal_sigma_u,
+                                                           signal_sigma_v=signal_sigma_v,
+                                                           signal_sigma_ratio=signal_sigma_ratio,
                                                            signal_amplitude=signal_amplitude,
                                                            signal_num_centers=sample_num_centers,
                                                            signal_sigma_values=sigma_list,
@@ -1703,6 +1817,10 @@ def generate_dataset(
                                                                      signal_factory=signal_factory_iso,
                                                                      signal_type="isotropic",
                                                                      signal_sigma=signal_sigma,
+                                                                     signal_sigma_ani=signal_sigma_ani,
+                                                                     signal_sigma_u=signal_sigma_u,
+                                                                     signal_sigma_v=signal_sigma_v,
+                                                                     signal_sigma_ratio=signal_sigma_ratio,
                                                                      signal_amplitude=signal_amplitude,
                                                                      signal_num_centers=1,
                                                                      signal_sigma_values=[sigma_list[0]] if sigma_list else None,
@@ -1722,6 +1840,10 @@ def generate_dataset(
                                                              signal_factory=signal_factory_aniso,
                                                              signal_type="anisotropic",
                                                              signal_sigma=signal_sigma,
+                                                             signal_sigma_ani=signal_sigma_ani,
+                                                             signal_sigma_u=signal_sigma_u,
+                                                             signal_sigma_v=signal_sigma_v,
+                                                             signal_sigma_ratio=signal_sigma_ratio,
                                                              signal_amplitude=signal_amplitude,
                                                              signal_num_centers=1,
                                                              signal_sigma_values=[
@@ -1957,11 +2079,18 @@ def generate_dataset(
                                                        meta=generation_meta, template_id=mesh_name,
                                                        deformation_case=case_name, random_seed=sample_seed,
                                                        signal_factory=signal_factory, signal_type=signal_type,
-                                                       signal_sigma=signal_sigma, signal_amplitude=signal_amplitude,
+                                                       signal_sigma=signal_sigma,
+                                                       signal_sigma_ani=signal_sigma_ani,
+                                                       signal_sigma_u=signal_sigma_u,
+                                                       signal_sigma_v=signal_sigma_v,
+                                                       signal_sigma_ratio=signal_sigma_ratio,
+                                                       signal_amplitude=signal_amplitude,
                                                        signal_num_centers=sample_num_centers,
                                                        signal_sigma_values=sigma_list,
-                                                       signal_amplitude_values=amplitude_list, rng=sample_rng,
-                                                       skip_mesh_save=True)
+                                                       signal_amplitude_values=amplitude_list,
+                                                       mnist_index=mnist_index,
+                                                       rng=sample_rng,
+                                                       skip_mesh_save=case_name != "case1_no")
                     except Exception as exc:  # noqa: BLE001
                         append_error_log(
                             log_path,
@@ -2105,7 +2234,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patch-radius-ratio", type=float, default=0.15, help="Patch radius as a fraction of the mesh bounding-box diagonal.")
     parser.add_argument("--smoothing-iterations", type=int, default=3, help="Base smoothing passes (overridden by deformation case configuration).")
     parser.add_argument("--group-candidates", type=int, default=5, help="Legacy parameter kept for backward compatibility.")
-    parser.add_argument("--roi-vertex-ratio", type=float, default=0.3, help="ROI-growth stop criterion as a fraction of the mesh vertex count.")
+    parser.add_argument(
+        "--roi-vertex-ratio",
+        type=float,
+        default=0.3,
+        help="ROI-growth stop criterion as a fraction of the mesh vertex count. For MNIST, this sets the ROI coverage around the north pole.",
+    )
     parser.add_argument("--max-ratio", type=float, default=0.8, help="Legacy parameter kept for backward compatibility.")
     parser.add_argument("--ring-size", type=int, default=None, help="Euclidean translation ring radius (if not provided, value is sampled from the deformation case).")
     parser.add_argument(
@@ -2124,6 +2258,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--signal-sigma", type=float, default=0.2, help="Signal width parameter for isotropic signals.")
     parser.add_argument("--signal-sigma-ani", type=float, default=0.8, help="Signal width parameter for anisotropic signals.")
+    parser.add_argument("--signal-sigma-u", type=float, default=None, help="Base anisotropic sigma (sigma_u). If not set, falls back to --signal-sigma-ani.")
+    parser.add_argument("--signal-sigma-v", type=float, default=None, help="Explicit anisotropic sigma_v; overrides ratio-based sigma_v.")
+    parser.add_argument("--signal-sigma-ratio", type=float, default=0.5, help="sigma_v = ratio * sigma_u when --signal-sigma-v not set. Default 0.5 for backward compatibility.")
     parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
     parser.add_argument(
         "--mnist-percentage",

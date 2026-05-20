@@ -84,6 +84,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Signal type        : {args.signal_type}")
     print(f"  Signal sigma       : {args.signal_sigma}")
     print(f"  Signal sigma ani   : {args.signal_sigma_ani}")
+    print(f"  Signal sigma u     : {args.signal_sigma_u}")
+    print(f"  Signal sigma v     : {args.signal_sigma_v}")
+    print(f"  Signal sigma ratio : {args.signal_sigma_ratio}")
     print(f"  Signal sigma var % : {args.signal_sigma_variation}")
     print(f"  Signal amp var %   : {args.signal_amplitude_variation}")
     print(f"  Signal amplitude   : {args.signal_amplitude}")
@@ -108,6 +111,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Split seed         : {args.split_seed}")
     print(f"  Group by template  : {args.group_by_template}")
     print(f"  Offset sample ctr  : {0}")
+    if args.signal_type == "mnist":
+        print("  MNIST projection   : S2CNN Driscoll-Healy grid -> mesh vertices (bilinear)")
+        print("  MNIST index order  : dataset order, no repeats")
     print("=" * 60)
 
     signal_type = args.signal_type
@@ -134,6 +140,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         max_iter=args.max_iter,
         signal_sigma=args.signal_sigma,
         signal_sigma_ani=args.signal_sigma_ani,
+        signal_sigma_u=args.signal_sigma_u if hasattr(args, 'signal_sigma_u') else None,
+        signal_sigma_v=args.signal_sigma_v if hasattr(args, 'signal_sigma_v') else None,
+        signal_sigma_ratio=args.signal_sigma_ratio if hasattr(args, 'signal_sigma_ratio') else 0.5,
         signal_sigma_variation_percent=args.signal_sigma_variation,
         signal_amplitude_variation_percent=args.signal_amplitude_variation,
         signal_amplitude=args.signal_amplitude,

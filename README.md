@@ -170,9 +170,12 @@ Output Structure:
 ```
 
 
-Key Points:
+ Key Points:
 
  - MNIST images downloaded automatically via scikit-learn's fetch_openml()
- - Spherical projection: MNIST pixel → vertex via theta/phi angles
+ - Spherical projection: S2CNN Driscoll-Healy sphere sample -> mesh vertices (bilinear interpolation)
+ - MNIST requires exactly one template mesh in the input directory
  - Each sample includes: original mesh index, MNIST digit label (0-9)
+ - MNIST samples are taken in dataset order (no repeats), up to --mnist-percentage or --mnist-total-count
+ - MNIST projection uses full-sphere resampling (no ROI masking)
  - No signal_sigma/signal_num_centers needed for MNIST (ignored automatically)
