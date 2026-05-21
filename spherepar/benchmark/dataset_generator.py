@@ -1418,7 +1418,7 @@ def generate_dataset(
         if mnist_total_count is not None and mnist_total_count <= 0:
             raise ValueError("mnist_total_count must be positive")
         # Force MNIST to case1_no
-        deformation_cases = ["case1_no"]
+        # deformation_cases = ["case1_no"]
         param_method = None
     
     if deformation_cases is None:
@@ -1470,7 +1470,7 @@ def generate_dataset(
         else:
             samples_per_center_and_case = int((mnist_percentage / 100.0) * total_mnist_count)
         signal_centers_options = [1]  # Force single center for MNIST
-        deformation_cases = ["case1_no"]  # Force no deformation for MNIST
+        # deformation_cases = ["case1_no"]  # Force no deformation for MNIST
     else:
         # Fix sample count logic: n_samples_per_mesh is per center option
         # Total samples = n_samples_per_mesh * len(signal_centers_options) * len(deformation_cases)
@@ -2090,7 +2090,16 @@ def generate_dataset(
                                                        signal_amplitude_values=amplitude_list,
                                                        mnist_index=mnist_index,
                                                        rng=sample_rng,
-                                                       skip_mesh_save=case_name != "case1_no")
+                                                       skip_mesh_save=(case_name == "case1_no"))
+                            # Ensure mesh file exists on disk; some callers may skip mesh write — write it here if missing
+                            try:
+                                mesh_file_path = Path(paths.get('mesh'))
+                                if mesh_file_path and not mesh_file_path.exists():
+                                    mesh_file_path.parent.mkdir(parents=True, exist_ok=True)
+                                    deformed.export(str(mesh_file_path))
+                            except Exception:
+                                # Log but continue; label writing will surface errors if mesh still missing
+                                pass
                     except Exception as exc:  # noqa: BLE001
                         append_error_log(
                             log_path,
