@@ -12,6 +12,7 @@ TASK_NUMBER_OF_CENTERS = "number_of_centers"
 TASK_CENTER_REGRESSION = "center_regression"
 TASK_SIGMA_REGRESSION = "sigma_regression"
 TASK_AMPLITUDE_REGRESSION = "amplitude_regression"
+TASK_MNIST_CLS = "mnist_cls"
 
 DEFAULT_TASKS = [
     TASK_NUMBER_OF_CENTERS,
@@ -38,11 +39,20 @@ def is_valid_for_amplitude_regression(label: Dict[str, Any]) -> bool:
     return int(label.get("signal", {}).get("num_centers", -1)) == 1
 
 
+def is_valid_for_mnist_cls(label: Dict[str, Any]) -> bool:
+    task_entry = label.get("tasks", {}).get(TASK_MNIST_CLS, {})
+    if isinstance(task_entry, dict) and task_entry.get("valid") is True:
+        mnist_index = label.get("signal", {}).get("mnist_index")
+        return isinstance(mnist_index, int) and 0 <= mnist_index < 70000
+    return False
+
+
 TASK_FILTERS = {
     TASK_NUMBER_OF_CENTERS: is_valid_for_number_of_centers,
     TASK_CENTER_REGRESSION: is_valid_for_center_regression,
     TASK_SIGMA_REGRESSION: is_valid_for_sigma_regression,
     TASK_AMPLITUDE_REGRESSION: is_valid_for_amplitude_regression,
+    TASK_MNIST_CLS: is_valid_for_mnist_cls,
 }
 
 
@@ -94,8 +104,8 @@ def _grouped_split(
     if len(records) == 0:
         return [([], [], []) for _ in range(num_folds)]
 
-    if train_ratio <= 0 or val_ratio <= 0 or test_ratio <= 0:
-        raise ValueError("train_ratio, val_ratio, and test_ratio must be positive")
+    if train_ratio <= 0 or test_ratio <= 0 or val_ratio < 0:
+        raise ValueError("train_ratio and test_ratio must be positive; val_ratio must be non-negative")
     if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
         raise ValueError("train_ratio + val_ratio + test_ratio must equal 1.0")
 
@@ -129,7 +139,11 @@ def _grouped_split(
 
         # train vs val split on remaining groups
         val_share_in_remain = val_ratio / (train_ratio + val_ratio)
-        val_count = max(1, int(round(remain_n * val_share_in_remain))) if remain_n > 1 else 0
+        val_count = (
+            max(1, int(round(remain_n * val_share_in_remain)))
+            if val_ratio > 0 and remain_n > 1
+            else 0
+        )
         val_count = min(val_count, max(remain_n - 1, 0))
         val_groups = remain_groups[:val_count]
         train_groups = remain_groups[val_count:]
@@ -139,6 +153,24 @@ def _grouped_split(
         test_ids = sorted([sid for g in test_groups for sid in g])
         folds.append((train_ids, val_ids, test_ids))
     return folds
+
+
+def _mnist_native_split(records: Sequence[Dict[str, Any]]) -> Tuple[List[str], List[str], List[str]]:
+    train_ids: List[str] = []
+    test_ids: List[str] = []
+    for rec in records:
+        sample_id = str(rec["sample_id"])
+        mnist_index = int(rec["signal"]["mnist_index"])
+        if mnist_index < 60000:
+            train_ids.append(sample_id)
+        else:
+            test_ids.append(sample_id)
+
+    train_ids = sorted(train_ids)
+    test_ids = sorted(test_ids)
+    # Keep validation aligned with the MNIST train partition, as requested.
+    val_ids = list(train_ids)
+    return train_ids, val_ids, test_ids
 
 
 def build_task_splits(
@@ -180,15 +212,19 @@ def build_task_splits(
         if task_name == TASK_NUMBER_OF_CENTERS:
             valid = _balance_number_of_centers(valid, rng)
 
-        folds = _grouped_split(
-            records=valid,
-            num_folds=num_folds,
-            train_ratio=train_ratio,
-            val_ratio=val_ratio,
-            test_ratio=test_ratio,
-            seed=seed,
-            group_by_template=group_by_template,
-        )
+        if task_name == TASK_MNIST_CLS:
+            train_ids, val_ids, test_ids = _mnist_native_split(valid)
+            folds = [(train_ids, val_ids, test_ids) for _ in range(num_folds)]
+        else:
+            folds = _grouped_split(
+                records=valid,
+                num_folds=num_folds,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+                seed=seed,
+                group_by_template=group_by_template,
+            )
 
         task_summary = {
             "num_valid_samples": len(valid),
@@ -200,6 +236,8 @@ def build_task_splits(
                 cls = int(rec.get("signal", {}).get("num_centers", -1))
                 counts[cls] = counts.get(cls, 0) + 1
             task_summary["class_counts"] = counts
+        if task_name == TASK_MNIST_CLS:
+            task_summary["split_source"] = "mnist_default"
 
         for fold_idx, (train_ids, val_ids, test_ids) in enumerate(folds, start=1):
             task_dir = folds_dir / f"fold{fold_idx}" / task_name
@@ -222,4 +260,3 @@ def build_task_splits(
     with open(summary_path, "w") as fh:
         json.dump(summary, fh, indent=2)
     return summary
-

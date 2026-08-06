@@ -662,6 +662,27 @@ def _randomize_signal_parameters(
     return sigma_list, amplitude_list, orientation_list, sigma_ani_list
 
 
+def _effective_param_method(
+    signal_type: Optional[str],
+    case_name: str,
+    param_method: Optional[str],
+) -> Optional[str]:
+    """Keep parametrization off for case1_no, otherwise use the requested method."""
+    if case_name == "case1_no":
+        return None
+    return param_method
+
+
+def _safe_unlink(path: Optional[str]) -> None:
+    """Remove a temporary file path if present."""
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 # ===========================================================================
 # 10. Save sample
 # ===========================================================================
@@ -1417,9 +1438,6 @@ def generate_dataset(
             raise ValueError(f"mnist_percentage must be in range [0.1, 100.0], got {mnist_percentage}")
         if mnist_total_count is not None and mnist_total_count <= 0:
             raise ValueError("mnist_total_count must be positive")
-        # Force MNIST to case1_no
-        # deformation_cases = ["case1_no"]
-        param_method = None
     
     if deformation_cases is None:
         deformation_cases = ["case2_small", "case3_large"]
@@ -1511,12 +1529,12 @@ def generate_dataset(
             for signal_num_centers_choice in signal_centers_options:
 
                 for _ in range(samples_per_center_and_case):
+                    tmp_path: Optional[str] = None
                     if case_name == "case1_no":
                         # No deformation case: use original mesh and only generate signals
                         deformed = mesh.copy()
                         quality = {"is_watertight": True}  # Original mesh is always valid
                         deformation_failed = False
-                        tmp_path = None
                         handle_ids = []
                         handle_positions = []
                         displacements = []
@@ -2110,12 +2128,12 @@ def generate_dataset(
                             traceback_text=traceback.format_exc(),
                         )
                         total_failed += 1
+                        _safe_unlink(tmp_path)
                         continue
 
                     param_success = False
                     param_error = None
-                    # Force param_method to None for case1_no (no deformation case)
-                    effective_param_method = None if case_name == "case1_no" else param_method
+                    effective_param_method = _effective_param_method(signal_type, case_name, param_method)
                     if effective_param_method is not None:
                         try:
                             sphere_paths = save_spherical_parametrization(
@@ -2164,6 +2182,7 @@ def generate_dataset(
                             deformation_case=case_name,
                         )
                         total_failed += 1
+                        _safe_unlink(tmp_path)
                         continue
 
                     print(
@@ -2173,10 +2192,7 @@ def generate_dataset(
                     total_saved += 1
 
                     # Clean up temp file
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                    _safe_unlink(tmp_path)
 
 
     if create_splits:
@@ -2329,7 +2345,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--split-tasks",
         type=str,
         default="number_of_centers,center_regression,sigma_regression,amplitude_regression",
-        help="Comma-separated task names to build splits for.",
+        help="Comma-separated task names to build splits for (supported: number_of_centers, center_regression, sigma_regression, amplitude_regression, mnist_cls).",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no-repair-holes", action="store_true", help="Disable hole repair on non-watertight input meshes.")
