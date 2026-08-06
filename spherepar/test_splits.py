@@ -6,11 +6,13 @@ from pathlib import Path
 from spherepar.benchmark.splits import (
     TASK_AMPLITUDE_REGRESSION,
     TASK_CENTER_REGRESSION,
+    TASK_MNIST_CLS,
     TASK_NUMBER_OF_CENTERS,
     TASK_SIGMA_REGRESSION,
     build_task_splits,
     is_valid_for_amplitude_regression,
     is_valid_for_center_regression,
+    is_valid_for_mnist_cls,
     is_valid_for_number_of_centers,
     is_valid_for_sigma_regression,
 )
@@ -31,6 +33,32 @@ def _write_label(
         json.dump(data, fh)
 
 
+def _write_mnist_label(
+    labels_dir: Path,
+    sample_id: str,
+    template_id: str,
+    mnist_index: int,
+    mnist_label: int,
+):
+    data = {
+        "sample_id": sample_id,
+        "template_id": template_id,
+        "signal": {
+            "signal_type": "mnist",
+            "mnist_index": mnist_index,
+            "mnist_label": mnist_label,
+        },
+        "tasks": {
+            "mnist_cls": {
+                "valid": True,
+                "label": mnist_label,
+            }
+        },
+    }
+    with open(labels_dir / f"{sample_id}.json", "w") as fh:
+        json.dump(data, fh)
+
+
 def test_task_filters():
     rec1 = {"signal": {"num_centers": 1}}
     rec3 = {"signal": {"num_centers": 3}}
@@ -44,6 +72,17 @@ def test_task_filters():
     assert is_valid_for_sigma_regression(rec1)
     assert is_valid_for_amplitude_regression(rec1)
     assert not is_valid_for_center_regression(rec3)
+
+    mnist_ok = {
+        "signal": {"mnist_index": 123, "mnist_label": 7},
+        "tasks": {"mnist_cls": {"valid": True, "label": 7}},
+    }
+    mnist_bad = {
+        "signal": {"mnist_index": 80000, "mnist_label": 7},
+        "tasks": {"mnist_cls": {"valid": True, "label": 7}},
+    }
+    assert is_valid_for_mnist_cls(mnist_ok)
+    assert not is_valid_for_mnist_cls(mnist_bad)
 
 
 def test_build_task_splits_writes_expected_files(tmp_path: Path):
@@ -250,6 +289,48 @@ def test_splits_non_overlapping(tmp_path: Path):
     assert len(all_samples) == 6, f"Expected 6 samples total, got {len(all_samples)}"
 
 
+def test_task_splits_allow_zero_validation_ratio(tmp_path: Path):
+    dataset_root = tmp_path / "dataset"
+    labels_dir = dataset_root / "labels"
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    idx = 1
+    for template_id in ["tpl_a", "tpl_b", "tpl_c", "tpl_d"]:
+        for _ in range(2):
+            _write_label(
+                labels_dir=labels_dir,
+                sample_id=f"sample_s{idx:06d}",
+                template_id=template_id,
+                num_centers=1,
+            )
+            idx += 1
+
+    summary = build_task_splits(
+        dataset_root=str(dataset_root),
+        tasks=[TASK_CENTER_REGRESSION],
+        num_folds=1,
+        train_ratio=0.8,
+        val_ratio=0.0,
+        test_ratio=0.2,
+        seed=42,
+        group_by_template=True,
+    )
+
+    base = dataset_root / "folds" / "fold1" / TASK_CENTER_REGRESSION
+    with open(base / "train.txt", "r") as fh:
+        train_ids = [line.strip() for line in fh if line.strip()]
+    with open(base / "val.txt", "r") as fh:
+        val_ids = [line.strip() for line in fh if line.strip()]
+    with open(base / "test.txt", "r") as fh:
+        test_ids = [line.strip() for line in fh if line.strip()]
+
+    assert len(train_ids) > 0
+    assert val_ids == []
+    assert len(test_ids) > 0
+    assert len(set(train_ids) & set(test_ids)) == 0
+    assert summary["tasks"][TASK_CENTER_REGRESSION]["folds"][0]["val_count"] == 0
+
+
 def test_classification_balance(tmp_path: Path):
     """Verify number_of_centers classification task has balanced class distribution."""
     dataset_root = tmp_path / "dataset"
@@ -296,3 +377,40 @@ def test_classification_balance(tmp_path: Path):
     assert "num_folds" in summary
     assert "tasks" in summary
     assert TASK_NUMBER_OF_CENTERS in summary["tasks"]
+
+
+def test_mnist_cls_uses_native_train_test_split(tmp_path: Path):
+    dataset_root = tmp_path / "dataset"
+    labels_dir = dataset_root / "labels"
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    # MNIST train partition (<60000)
+    _write_mnist_label(labels_dir, "sample_s000001", "tpl_mnist", 10, 1)
+    _write_mnist_label(labels_dir, "sample_s000002", "tpl_mnist", 59999, 2)
+    # MNIST test partition (>=60000)
+    _write_mnist_label(labels_dir, "sample_s000003", "tpl_mnist", 60000, 3)
+    _write_mnist_label(labels_dir, "sample_s000004", "tpl_mnist", 69999, 4)
+
+    build_task_splits(
+        dataset_root=str(dataset_root),
+        tasks=[TASK_MNIST_CLS],
+        num_folds=2,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        seed=42,
+        group_by_template=True,
+    )
+
+    for fold_idx in [1, 2]:
+        base = dataset_root / "folds" / f"fold{fold_idx}" / TASK_MNIST_CLS
+        with open(base / "train.txt", "r") as fh:
+            train_ids = [line.strip() for line in fh if line.strip()]
+        with open(base / "val.txt", "r") as fh:
+            val_ids = [line.strip() for line in fh if line.strip()]
+        with open(base / "test.txt", "r") as fh:
+            test_ids = [line.strip() for line in fh if line.strip()]
+
+        assert train_ids == ["sample_s000001", "sample_s000002"]
+        assert val_ids == ["sample_s000001", "sample_s000002"]
+        assert test_ids == ["sample_s000003", "sample_s000004"]
