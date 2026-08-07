@@ -144,12 +144,15 @@ def stratified_train_test_split(
     train_val_labels = [l for l in labels if l["template_id"] in train_val_templates]
     
     # Split train_val into train and val
-    if train_val_labels:
+    if train_val_labels and val_ratio > 0:
         train_labels, val_labels = train_test_split(
             train_val_labels,
             test_size=val_ratio,
             random_state=seed,
         )
+    elif train_val_labels:
+        train_labels = train_val_labels
+        val_labels = []
     else:
         train_labels = []
         val_labels = []
@@ -216,12 +219,15 @@ def create_cross_validation_folds(
         train_val_labels = [l for l in labels if l["template_id"] in train_val_template_set]
         
         # Split train_val into train and val
-        if train_val_labels:
+        if train_val_labels and val_ratio > 0:
             train_labels, val_labels = train_test_split(
                 train_val_labels,
                 test_size=val_ratio,
                 random_state=seed + fold_idx,  # Different random state per fold
             )
+        elif train_val_labels:
+            train_labels = train_val_labels
+            val_labels = []
         else:
             train_labels = []
             val_labels = []

@@ -38,6 +38,7 @@ from spherepar.benchmark.splits import (
     is_valid_for_center_regression,
     is_valid_for_sigma_regression,
     is_valid_for_amplitude_regression,
+    is_valid_for_mnist_cls,
 )
 
 __all__ = [
@@ -65,4 +66,5 @@ __all__ = [
     "is_valid_for_center_regression",
     "is_valid_for_sigma_regression",
     "is_valid_for_amplitude_regression",
+    "is_valid_for_mnist_cls",
 ]
