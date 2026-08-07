@@ -41,9 +41,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
-
-from spherepar.benchmark.utils import extract_roi_patch
-from spherepar.benchmark.signals import isotropic_gaussian, anisotropic_gaussian
+from spherepar.benchmark.signals import (
+    _stable_tangent_basis,
+    anisotropic_gaussian,
+    compute_gauge_relative_angle_and_target,
+    isotropic_gaussian,
+    sample_hm_major_axis,
+)
 
 # ---------------------------------------------------------------------------
 # Lazy import of the C++ extension so the module can be imported even if the
@@ -648,7 +652,7 @@ class SurfaceFactory:
         Expected keys in *params*: center, normal (optional, estimated from
         mesh if absent), sigma_u, sigma_v, amplitude, orientation_angle.
         """
-        center = _resolve_center(vertices, params.get("center")) # get the coordina on the mesh
+        center = _resolve_center(vertices, params.get("center"))
         normal = params.get("normal")
         if normal is None:
             normal = _estimate_normal(vertices, center)
@@ -657,36 +661,87 @@ class SurfaceFactory:
         sigma_u = float(params.get("sigma_u", 0.1))
         sigma_v = float(params.get("sigma_v", 0.05))
         amplitude = float(params.get("amplitude", 1.0))
-        orientation_angle = float(params.get("orientation_angle", 0.0))
-        # devnote: just something large for now not in the main generator method
-        # radius = float(params.get("radius", 100))  # Add radius parameter
+        gauge_eps = float(params.get("gauge_eps", 1e-8))
+        gauge_min_projected_norm = float(params.get("gauge_min_projected_norm", 0.05))
+        gauge = np.asarray(params.get("gauge", np.array([0.0, 0.0, 1.0], dtype=float)), dtype=float)
+
+        major_axis_input = params.get("major_axis")
+        rng = params.get("rng")
+        if rng is None:
+            seed = params.get("seed")
+            if seed is not None:
+                rng = np.random.default_rng(int(seed))
+        orientation_angle = params.get("orientation_angle")
+        delta_param = params.get("delta", orientation_angle)
+
+        if major_axis_input is None:
+            hm_info = sample_hm_major_axis(
+                center=np.asarray(center, dtype=float),
+                rng=rng if isinstance(rng, np.random.Generator) else None,
+                delta=None if delta_param is None else float(delta_param),
+                gauge=gauge,
+                eps=gauge_eps,
+                min_gauge_projection_norm=gauge_min_projected_norm,
+            )
+            major_axis = np.asarray(hm_info["major_axis"], dtype=float)
+            delta = float(hm_info["delta"])
+            phi = float(hm_info["phi"])
+            target = np.asarray(hm_info["target"], dtype=float)
+            e1 = np.asarray(hm_info["e1"], dtype=float)
+            e2 = np.asarray(hm_info["e2"], dtype=float)
+            g1 = np.asarray(hm_info["g1"], dtype=float)
+            g2 = np.asarray(hm_info["g2"], dtype=float)
+            center_unit = np.asarray(hm_info["center"], dtype=float)
+        else:
+            major_axis = np.asarray(major_axis_input, dtype=float)
+            center_unit = np.asarray(center, dtype=float)
+            gauge_info = compute_gauge_relative_angle_and_target(
+                center=center_unit,
+                major_axis=major_axis,
+                gauge=gauge,
+                eps=gauge_eps,
+                min_gauge_projection_norm=gauge_min_projected_norm,
+            )
+            phi = float(gauge_info["phi"])
+            target = np.asarray(gauge_info["target"], dtype=float)
+            g1 = np.asarray(gauge_info["g1"], dtype=float)
+            g2 = np.asarray(gauge_info["g2"], dtype=float)
+            delta = float(delta_param) if delta_param is not None else phi
+            e1, e2 = _stable_tangent_basis(center_unit)
 
         sig = anisotropic_gaussian(
-            vertices, center, normal, sigma_u, sigma_v,
-            amplitude, orientation_angle
+            vertices=vertices,
+            center=np.asarray(center, dtype=float),
+            normal=normal,
+            sigma_u=sigma_u,
+            sigma_v=sigma_v,
+            amplitude=amplitude,
+            orientation_angle=float(delta),
+            major_axis=major_axis,
+            eps=gauge_eps,
         )
-
-        # Constrain signal to ROI radius
-        # shrank to get 50% of the mesh:
-        n_samples = vertices.shape[0]
-        center_of_mass = np.mean(vertices, axis=0)
-        radius = float(np.linalg.norm(center - center_of_mass, ord=2))
-        print('>>> Anisotropic signal roi radius:', radius)
-        roi_patch, roi_mask = extract_roi_patch(vertices, center, radius)
-        print(f"Percentatge of ROI patch: {len(roi_patch)/n_samples*100:.2f}%")
-        # print("Roi mask:", roi_mask)
-        # sig = np.where(roi_mask, sig, 0)  # Zero out signal outside ROI
-        sig[roi_mask] = 0
 
         meta = {
             "family": "anisotropic_gaussian",
-            "center": center.tolist(),
+            "center": np.asarray(center, dtype=float).tolist(),
+            "center_unit": center_unit.tolist(),
             "normal": normal.tolist(),
+            "major_axis": major_axis.tolist(),
+            "delta": float(delta),
+            "phi": float(phi),
+            "target_doubled_angle": target.tolist(),
+            "gauge": gauge.tolist(),
+            "gauge_min_projected_norm": gauge_min_projected_norm,
+            "gauge_e1": g1.tolist(),
+            "gauge_e2": g2.tolist(),
+            "hm_e1": e1.tolist(),
+            "hm_e2": e2.tolist(),
             "sigma_u": sigma_u,
             "sigma_v": sigma_v,
             "amplitude": amplitude,
-            "orientation_angle": orientation_angle,
-            "radius": radius,  # Add to metadata
+            "orientation_angle": float(phi),
+            "orientation_angle_period": float(np.pi),
+            "orientation_target_period": float(np.pi),
         }
         return sig, meta
 

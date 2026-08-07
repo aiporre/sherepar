@@ -64,6 +64,7 @@ import trimesh.smoothing
 
 from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.surface import Surface, SurfaceFactory
+from spherepar.benchmark.signals import sample_hm_major_axis
 from spherepar.spherical_parametrization import compute_spherical_parametrization
 from spherepar.benchmark.splits import build_task_splits, DEFAULT_TASKS
 from spherepar.s2cnn.gendata import get_projection_grid, project_2d_on_sphere
@@ -608,7 +609,7 @@ def _randomize_signal_parameters(
         sigma_ani: float = None,
         variation_percent: float = 20.0,
         rng: Optional[np.random.Generator] = None,
-) -> Tuple[List[float], List[float], List[float]]:
+) -> Tuple[List[float], List[float], List[float], List[float]]:
     """Randomize signal parameters (sigma, amplitude, orientation) by ±variation_percent.
     
     Parameters
@@ -626,8 +627,8 @@ def _randomize_signal_parameters(
     
     Returns
     -------
-    Tuple[List[float], List[float], List[float]]
-        (sigma_list, amplitude_list, orientation_list) with one value per center.
+    Tuple[List[float], List[float], List[float], List[float]]
+        (sigma_list, amplitude_list, orientation_list, sigma_ani_list).
         Orientations are in radians, uniformly sampled from [0, π).
     """
     if rng is None:
@@ -1000,22 +1001,65 @@ def save_sample_signal(
                     "amplitudes": amplitudes,  # Pass per-center amplitudes
                 }
             else:
-                # For anisotropic: use sigma_u and sigma_v with CLI-controlled precedence
-                # precedence: explicit signal_sigma_v -> explicit signal_sigma_u -> sigmas[0] or signal_sigma_ani
+                # For anisotropic: use sigma_u and sigma_v with CLI-controlled precedence.
+                # The physical axis is generated from HM tangent frame + sampled perturbation.
                 sigma_u = sigmas[0] if sigmas else float(signal_sigma_ani)
                 if signal_sigma_u is not None:
                     sigma_u = float(signal_sigma_u)
-                orientation_angle = signal_orientation_values[0] if signal_orientation_values else 0.0
+                sampled_delta = signal_orientation_values[0] if signal_orientation_values else None
                 if signal_sigma_v is not None:
                     sigma_v = float(signal_sigma_v)
                 else:
                     sigma_v = max(sigma_u * float(signal_sigma_ratio), 1e-6)
+
+                gauge_eps = 1e-8
+                gauge_min_projected_norm = 0.05
+                center_idx = int(signal_centers[0])
+                hm_info: Optional[Dict[str, Any]] = None
+                last_error: Optional[Exception] = None
+                max_attempts = min(max(len(mesh.vertices), 1), 256)
+                for _ in range(max_attempts):
+                    center_candidate = np.asarray(mesh.vertices[center_idx], dtype=float)
+                    try:
+                        hm_info = sample_hm_major_axis(
+                            center=center_candidate,
+                            rng=rng,
+                            delta=float(sampled_delta) if sampled_delta is not None else None,
+                            eps=gauge_eps,
+                            min_gauge_projection_norm=gauge_min_projected_norm,
+                        )
+                        break
+                    except ValueError as exc:
+                        last_error = exc
+                        center_idx = int(rng.integers(0, len(mesh.vertices)))
+                        sampled_delta = None
+                if hm_info is None:
+                    raise RuntimeError(
+                        f"Failed to sample anisotropic HM frame/axis after {max_attempts} attempts: {last_error}"
+                    )
+
+                # Keep center metadata aligned with the accepted gauge-valid center.
+                signal_centers = [center_idx]
+                signal_center_ids = [center_idx]
+                signal_centers_coords = [np.asarray(mesh.vertices[center_idx], dtype=float).tolist()]
+
                 signal_params = {
-                    "center": signal_centers[0],
+                    "center": center_idx,
                     "sigma_u": sigma_u,
                     "sigma_v": sigma_v,
                     "amplitude": amplitudes[0],
-                    "orientation_angle": orientation_angle
+                    "major_axis": np.asarray(hm_info["major_axis"], dtype=float).tolist(),
+                    "delta": float(hm_info["delta"]),
+                    "orientation_angle": float(hm_info["delta"]),
+                    "phi": float(hm_info["phi"]),
+                    "target_doubled_angle": np.asarray(hm_info["target"], dtype=float).tolist(),
+                    "hm_e1": np.asarray(hm_info["e1"], dtype=float).tolist(),
+                    "hm_e2": np.asarray(hm_info["e2"], dtype=float).tolist(),
+                    "gauge_e1": np.asarray(hm_info["g1"], dtype=float).tolist(),
+                    "gauge_e2": np.asarray(hm_info["g2"], dtype=float).tolist(),
+                    "gauge": [0.0, 0.0, 1.0],
+                    "gauge_eps": gauge_eps,
+                    "gauge_min_projected_norm": gauge_min_projected_norm,
                 }
 
             surface = Surface(
@@ -1917,9 +1961,29 @@ def generate_dataset(
                                 # Extract signal parameters from the return dicts (which now include signal_params)
                                 sig_iso_params = paths_iso.get("signal_params", {})
                                 sig_aniso_params = paths_aniso.get("signal_params", {})
+                                sig_aniso_meta = sig_aniso.get("signal_meta", {}) if isinstance(sig_aniso, dict) else {}
                                 sigma_u = sig_aniso_params.get("sigma_u", sig_aniso.get("sigmas", [None])[0] if sig_aniso.get("sigmas") else None)
                                 sigma_v = sig_aniso_params.get("sigma_v", None)
-                                orientation_angle = sig_aniso_params.get("orientation_angle", None)
+                                orientation_angle = sig_aniso_meta.get("phi", sig_aniso_params.get("phi", None))
+                                orientation_target = sig_aniso_meta.get(
+                                    "target_doubled_angle",
+                                    sig_aniso_params.get("target_doubled_angle"),
+                                )
+                                orientation_target_valid = (
+                                    isinstance(orientation_target, (list, tuple))
+                                    and len(orientation_target) == 2
+                                )
+                                orientation_debug = {
+                                    "center_unit": sig_aniso_meta.get("center_unit"),
+                                    "major_axis": sig_aniso_meta.get("major_axis", sig_aniso_params.get("major_axis")),
+                                    "delta": sig_aniso_meta.get("delta", sig_aniso_params.get("delta")),
+                                    "phi": orientation_angle,
+                                    "target_doubled_angle": orientation_target,
+                                    "gauge_e1": sig_aniso_meta.get("gauge_e1", sig_aniso_params.get("gauge_e1")),
+                                    "gauge_e2": sig_aniso_meta.get("gauge_e2", sig_aniso_params.get("gauge_e2")),
+                                    "hm_e1": sig_aniso_meta.get("hm_e1", sig_aniso_params.get("hm_e1")),
+                                    "hm_e2": sig_aniso_meta.get("hm_e2", sig_aniso_params.get("hm_e2")),
+                                }
                                 # TODO: make this a function for two is okay.. if I need to increase this will explote.
                                 signals_list = [
                                     {
@@ -1979,8 +2043,14 @@ def generate_dataset(
                                             "sigma_parallel": sigma_u,
                                             "sigma_perpendicular": sigma_v,
                                             "orientation_angles": [orientation_angle] if orientation_angle is not None else None,
+                                            "orientation_targets_doubled_angle": [orientation_target] if orientation_target is not None else None,
+                                            "hm_basis": {
+                                                "e1": orientation_debug.get("hm_e1"),
+                                                "e2": orientation_debug.get("hm_e2"),
+                                            },
                                             "angle_units": "radians",
                                             "orientation_period": 3.1415926536,
+                                            "orientation_target": "cos2phi_sin2phi",
                                             "frame": "sphere_tangent",
                                             "distance_type": "local_tangent_geodesic",
                                             "sigma_units": "surface_distance",
@@ -1991,6 +2061,7 @@ def generate_dataset(
                                             "clip_max": None,
                                             "normalize_after_generation": False,
                                         },
+                                        "orientation_debug": orientation_debug,
                                     },
                                 ]
 
@@ -2013,8 +2084,8 @@ def generate_dataset(
                                             "number_of_centers": {"valid": True, "label": sig_aniso.get("num_centers", 1), "dtype": "int64"},
                                             "center_regression": {"valid": True, "label": sig_aniso.get("centers", [None])[0], "dtype": "float32", "target_space": "xyz"},
                                             "amplitude_regression": {"valid": True, "label": sig_aniso.get("amplitudes", [None])[0], "dtype": "float32"},
-                                            "anisotropic_parameters_regression": {"valid": True, "label": {"sigma_parallel": sigma_u, "sigma_perpendicular": sigma_v, "orientation": orientation_angle}, "dtype": "float32", "units": {"sigma_parallel": "surface_distance", "sigma_perpendicular": "surface_distance", "orientation": "radians"}, "orientation_period": 3.1415926536, "target_order": ["sigma_parallel", "sigma_perpendicular", "orientation"]},
-                                            "orientation_regression": {"valid": True, "label": orientation_angle, "dtype": "float32", "units": "radians", "period": 3.1415926536},
+                                            "anisotropic_parameters_regression": {"valid": True, "label": {"sigma_parallel": sigma_u, "sigma_perpendicular": sigma_v, "orientation": orientation_angle, "orientation_target_doubled_angle": orientation_target, "hm_e1": orientation_debug.get("hm_e1"), "hm_e2": orientation_debug.get("hm_e2")}, "dtype": "float32", "units": {"sigma_parallel": "surface_distance", "sigma_perpendicular": "surface_distance", "orientation": "radians"}, "orientation_period": 3.1415926536, "target_order": ["sigma_parallel", "sigma_perpendicular", "orientation"]},
+                                            "orientation_regression": {"valid": bool(orientation_target_valid), "label": orientation_target, "dtype": "float32", "representation": "cos2phi_sin2phi", "period": 3.1415926536},
                                         },
                                     },
                                 }
