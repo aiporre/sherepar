@@ -110,7 +110,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Test ratio         : {args.test_ratio}")
     print(f"  Split seed         : {args.split_seed}")
     print(f"  Group by template  : {args.group_by_template}")
-    print(f"  Offset sample ctr  : {0}")
+    print(
+        "  Resume             : "
+        + ("automatic from complete generated samples" if args.resume else "disabled")
+    )
     if args.signal_type == "mnist":
         print("  MNIST projection   : S2CNN Driscoll-Healy grid -> mesh vertices (bilinear)")
         print("  MNIST index order  : dataset order, no repeats")
@@ -165,6 +168,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,
         offset_sample_counter=0,
+        resume=args.resume,
         mnist_percentage=args.mnist_percentage if hasattr(args, 'mnist_percentage') else 100.0,
         mnist_total_count=args.mnist_total_count if hasattr(args, 'mnist_total_count') else None,
     )

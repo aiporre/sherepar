@@ -51,6 +51,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import traceback
@@ -585,6 +586,93 @@ def _make_sample_id(sample_idx: int, template_name: Optional[str] = None) -> str
         safe_name = "".join(c if c.isalnum() or c == "_" else "_" for c in template_name)
         return f"{safe_name}_s{sample_idx:06d}"
     return f"sample_s{sample_idx:06d}"
+
+
+_SIGNAL_SAMPLE_SUFFIX = re.compile(r"^(?P<sample_id>.+)_(?:iso|aniso)_\d+$")
+_SAMPLE_INDEX_SUFFIX = re.compile(r"_s(?P<index>\d+)$")
+
+
+def _signal_sample_id(signal_path: Path) -> str:
+    """Return the owning sample ID for a saved signal file."""
+    stem = signal_path.stem
+    if stem.endswith("_mnist"):
+        return stem[:-len("_mnist")]
+    match = _SIGNAL_SAMPLE_SUFFIX.match(stem)
+    return match.group("sample_id") if match else stem
+
+
+def _list_completed_samples(root: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]:
+    """Find samples with all artifacts needed to safely resume generation.
+
+    A primary label shares its stem with the mesh.  Per-signal and spherical
+    metadata labels do not, so that convention cleanly excludes those helper
+    labels.  A successful parametrization also requires its sphere OBJ.
+    """
+    root_path = Path(root)
+    meshes = {path.stem for path in (root_path / "meshes").glob("*.obj")}
+    spheres = {path.stem for path in (root_path / "spheres").glob("*.obj")}
+    signals = {
+        _signal_sample_id(path)
+        for path in (root_path / "signals").glob("*.npy")
+    }
+    label_paths = {
+        path.stem: path
+        for path in (root_path / "labels").glob("*.json")
+        if path.stem in meshes
+    }
+
+    completed: Dict[str, Dict[str, Any]] = {}
+    for sample_id in meshes & signals & set(label_paths):
+        try:
+            with open(label_paths[sample_id], "r") as fh:
+                label = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        parametrization = label.get("parametrization", {})
+        if not isinstance(parametrization, dict):
+            parametrization = {}
+        param_method = parametrization.get("method")
+        param_success = bool(parametrization.get("success"))
+        param_error = parametrization.get("error")
+        if param_success and sample_id not in spheres:
+            continue
+        # The primary label is written before parametrization starts.  A label
+        # with a requested method but no result is therefore an interrupted
+        # sample, not a completed one.  A recorded parametrization failure is
+        # retained because that is how the existing generator records a saved
+        # sample when parametrization itself fails.
+        if param_method is not None and not param_success and param_error is None:
+            continue
+
+        completed[sample_id] = label
+
+    counts = {
+        "meshes": len(meshes),
+        "spheres": len(spheres),
+        "signals": len(signals),
+        "labels": len(label_paths),
+    }
+    return completed, counts
+
+
+def _label_generation_value(label: Dict[str, Any], key: str) -> Optional[str]:
+    """Read a generation field from either supported label schema."""
+    metadata = label.get("metadata")
+    if isinstance(metadata, dict) and metadata.get(key) is not None:
+        return str(metadata[key])
+    value = label.get(key)
+    return str(value) if value is not None else None
+
+
+def _next_sample_index(sample_ids: List[str]) -> int:
+    """Return an ID counter that cannot overwrite an existing completed sample."""
+    indexes = []
+    for sample_id in sample_ids:
+        match = _SAMPLE_INDEX_SUFFIX.search(sample_id)
+        if match:
+            indexes.append(int(match.group("index")))
+    return max(indexes) + 1 if indexes else 0
 
 
 def _sample_deformation_config(case_name: str, rng: np.random.Generator) -> Dict[str, Any]:
@@ -1430,6 +1518,7 @@ def generate_dataset(
         split_seed: int = 0,
         group_by_template: bool = True,
         offset_sample_counter: int = 0,
+        resume: bool = True,
         mnist_percentage: float = 100.0,
         mnist_total_count: Optional[int] = None,
 
@@ -1511,8 +1600,6 @@ def generate_dataset(
     total_saved = 0
     total_failed = 0
 
-    sample_idx = 0 + offset_sample_counter if offset_sample_counter is not None else 0
-
     if signal_centers_options is None:
         signal_centers_options = list(range(1, signal_num_centers + 1))
     signal_centers_options = [int(v) for v in signal_centers_options if int(v) > 0]
@@ -1539,14 +1626,53 @@ def generate_dataset(
         samples_per_center_and_case = n_samples_per_mesh
     
     total_samples_plan = samples_per_center_and_case * len(signal_centers_options) * len(deformation_cases)
+    total_samples_requested = total_samples_plan * len(mesh_pairs)
+
+    if resume:
+        completed_samples, artifact_counts = _list_completed_samples(output_root)
+    else:
+        completed_samples = {}
+        artifact_counts = {"meshes": 0, "spheres": 0, "signals": 0, "labels": 0}
+    current_template_ids = {mesh_name for mesh_name, _ in mesh_pairs}
+    requested_cases = set(deformation_cases)
+    completed_for_request = [
+        sample_id
+        for sample_id, label in completed_samples.items()
+        if _label_generation_value(label, "template_id") in current_template_ids
+        and _label_generation_value(label, "deformation_case") in requested_cases
+    ]
+    # Skip the already-completed slots in this invocation.  The counter itself
+    # is global to the output root so separately generated deformation cases
+    # never overwrite each other's sample IDs.
+    resume_slots = min(len(completed_for_request), total_samples_requested)
+    requested_offset = int(offset_sample_counter or 0)
+    sample_idx = max(requested_offset, _next_sample_index(list(completed_samples)))
+
+    if resume:
+        print(
+            "Resume scan: "
+            f"meshes={artifact_counts['meshes']}, "
+            f"spheres={artifact_counts['spheres']}, "
+            f"signals={artifact_counts['signals']}, "
+            f"labels={artifact_counts['labels']}, "
+            f"complete={len(completed_samples)}"
+        )
+    else:
+        print("Resume disabled: generating the full requested plan from the configured offset.")
+    print(
+        f"Generation plan: {total_samples_requested} sample(s) "
+        f"({total_samples_plan} per mesh); "
+        f"resuming after {resume_slots} matching sample(s) at index {sample_idx}."
+    )
     mnist_index_iter: Optional[Iterator[int]] = None
     if signal_type == "mnist":
         if total_samples_plan > total_mnist_count:
             raise ValueError(
                 f"Requested {total_samples_plan} MNIST samples, but dataset has {total_mnist_count} images"
             )
-        mnist_index_iter = iter(range(total_samples_plan))
+        mnist_index_iter = iter(range(resume_slots, total_samples_plan))
 
+    planned_slot = 0
     for mesh_name, template_mesh in mesh_pairs:
         print(f"\nProcessing: {mesh_name}")
 
@@ -1573,6 +1699,10 @@ def generate_dataset(
             for signal_num_centers_choice in signal_centers_options:
 
                 for _ in range(samples_per_center_and_case):
+                    if planned_slot < resume_slots:
+                        planned_slot += 1
+                        continue
+                    planned_slot += 1
                     tmp_path: Optional[str] = None
                     if case_name == "case1_no":
                         # No deformation case: use original mesh and only generate signals
@@ -2419,6 +2549,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Comma-separated task names to build splits for (supported: number_of_centers, center_regression, sigma_regression, amplitude_regression, mnist_cls).",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        default=True,
+        help="Disable automatic resume and generate the full requested plan from sample index 0.",
+    )
     parser.add_argument("--no-repair-holes", action="store_true", help="Disable hole repair on non-watertight input meshes.")
     parser.add_argument("--drop-non-watertight", action="store_true", help="Drop deformations that are not watertight after smoothing/validation.")
     return parser
@@ -2472,6 +2609,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         repair_holes=not args.no_repair_holes,
         drop_non_watertight=args.drop_non_watertight,
         offset_sample_counter=0,
+        resume=args.resume,
     )
 
 
