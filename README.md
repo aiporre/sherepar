@@ -102,6 +102,37 @@ pip install rtree
 
 # Data generation
 
+## Importing existing meshes (generic and FAUST)
+
+Use `examples/script_to_generate_dataset_from_obj.py` when the input meshes
+already exist and should be copied into the dataset layout without deformation.
+For every supported input mesh (`.obj`, `.ply`, `.stl`, or `.off`), it writes a
+mesh OBJ, one per-vertex signal array, one label JSON, and a spherical
+parametrization (FLASH by default, or CEM).
+
+Generic meshes receive an all-zero `float32` signal with one value per vertex:
+
+```bash
+python examples/script_to_generate_dataset_from_obj.py \
+    --input-dir data/source_meshes \
+    --output-root data/imported_meshes
+```
+
+For FAUST, point `--faust-dir` at the FAUST root containing `registrations/`:
+
+```bash
+python examples/script_to_generate_dataset_from_obj.py \
+    --faust-dir /path/to/FAUST \
+    --output-root data/imported_faust
+```
+
+`--faust-dir` automatically selects FAUST mode; `--dataname FAUST` is not
+required. In this mode the signal is the `float32` vertex index array
+`[0, 1, ..., N-1]`, and the label metadata records `dataname: "FAUST"`. The
+vertex ordering is therefore part of the signal definition. These imported
+datasets contain one `main` signal per mesh, rather than the isotropic and
+anisotropic Gaussian signal set produced by `script_to_generate_dataset.py`.
+
 ## MNIST
 
 Use `examples/script_to_generate_dataset.py` with `--signal-type mnist`.
