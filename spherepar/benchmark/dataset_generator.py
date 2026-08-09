@@ -47,11 +47,14 @@ main()
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import importlib.util
 import json
 import math
+import multiprocessing
 import os
 import re
+import shutil
 import sys
 import tempfile
 import traceback
@@ -1473,6 +1476,151 @@ def append_error_log(
             fh.write(traceback_text.rstrip() + "\n")
 
 
+def _run_sample_in_worker(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate one sample in an isolated staging directory.
+
+    Staging keeps workers from concurrently modifying the dataset root.  The
+    parent moves a successful worker's artifacts into the final layout.
+    """
+    stage_root = tempfile.mkdtemp(prefix="spherepar-worker-")
+    stage_input = Path(stage_root) / "input"
+    stage_input.mkdir()
+    source_path = Path(task["source_mesh"])
+    staged_source = stage_input / source_path.name
+    try:
+        try:
+            os.symlink(source_path, staged_source)
+        except OSError:
+            shutil.copy2(source_path, staged_source)
+
+        config = dict(task["config"])
+        config.update(
+            input_dir=str(stage_input),
+            output_root=stage_root,
+            n_samples_per_mesh=1,
+            signal_centers_options=[task["signal_num_centers"]],
+            deformation_cases=[task["deformation_case"]],
+            seed=task["seed"],
+            offset_sample_counter=task["sample_index"],
+            resume=False,
+            workers=1,
+            create_splits=False,
+            mnist_index_offset=task["mnist_index"],
+            mnist_total_count=1,
+        )
+        saved = generate_dataset(**config)
+        return {
+            "sample_id": task["sample_id"],
+            "saved": saved,
+            "stage_root": stage_root,
+            "template_id": task["template_id"],
+            "deformation_case": task["deformation_case"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "sample_id": task["sample_id"],
+            "saved": 0,
+            "stage_root": stage_root,
+            "template_id": task["template_id"],
+            "deformation_case": task["deformation_case"],
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def _merge_worker_output(stage_root: str, output_root: str, log_path: str) -> None:
+    """Move one worker's uniquely named artifacts into the final dataset."""
+    stage = Path(stage_root)
+    root = Path(output_root)
+    try:
+        for dirname in ("meshes", "signals", "spheres", "labels"):
+            source_dir = stage / dirname
+            if not source_dir.is_dir():
+                continue
+            destination_dir = root / dirname
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            for source in source_dir.iterdir():
+                if source.is_file():
+                    shutil.move(str(source), str(destination_dir / source.name))
+
+        worker_log = stage / "logs" / "errors.log"
+        if worker_log.is_file():
+            with open(worker_log, "r") as fh:
+                log_text = fh.read()
+            if log_text:
+                with open(log_path, "a") as fh:
+                    fh.write(log_text)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _generate_dataset_parallel(
+        *,
+        tasks: List[Dict[str, Any]],
+        workers: int,
+        output_root: str,
+        log_path: str,
+        create_splits: bool,
+        split_tasks: Optional[List[str]],
+        num_folds: int,
+        train_ratio: float,
+        val_ratio: float,
+        test_ratio: float,
+        split_seed: int,
+        group_by_template: bool,
+) -> int:
+    """Run independent sample jobs and merge their staged outputs."""
+    total_saved = 0
+    total_failed = 0
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
+        futures = [executor.submit(_run_sample_in_worker, task) for task in tasks]
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as exc:  # noqa: BLE001
+                total_failed += 1
+                print(f"  worker crashed: {exc}")
+                append_error_log(log_path, "worker", f"worker crashed: {exc}", traceback_text=traceback.format_exc())
+                continue
+
+            _merge_worker_output(result["stage_root"], output_root, log_path)
+            if result.get("error"):
+                total_failed += 1
+                print(f"  worker failed {result['sample_id']}: {result['error']}")
+                append_error_log(
+                    log_path,
+                    result["sample_id"],
+                    f"worker failed: {result['error']}",
+                    template_id=result["template_id"],
+                    deformation_case=result["deformation_case"],
+                    traceback_text=result.get("traceback"),
+                )
+            elif result["saved"]:
+                total_saved += int(result["saved"])
+                print(f"  worker completed {result['sample_id']}")
+            else:
+                total_failed += 1
+                print(f"  worker produced no sample for {result['sample_id']}")
+
+    if create_splits:
+        build_task_splits(
+            dataset_root=output_root,
+            tasks=split_tasks if split_tasks is not None else DEFAULT_TASKS,
+            num_folds=num_folds,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=split_seed,
+            group_by_template=group_by_template,
+        )
+
+    print(f"\nDone. Saved: {total_saved} samples, Failed: {total_failed}")
+    print(f"Error log  : {log_path}")
+    print(f"Output root: {output_root}")
+    return total_saved
+
+
 # ===========================================================================
 # 13. Top-level generator
 # ===========================================================================
@@ -1519,8 +1667,10 @@ def generate_dataset(
         group_by_template: bool = True,
         offset_sample_counter: int = 0,
         resume: bool = True,
+        workers: int = 1,
         mnist_percentage: float = 100.0,
         mnist_total_count: Optional[int] = None,
+        mnist_index_offset: int = 0,
 
 ) -> int:
     """Run the full dataset generation pipeline.
@@ -1546,6 +1696,8 @@ def generate_dataset(
         Number of samples successfully saved.
     
     """
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
     if not _GRAPHOP_AVAILABLE:
         raise ImportError(
             "graphop C++ extension is required. Build it with CMake (see BUILD.md)."
@@ -1664,13 +1816,102 @@ def generate_dataset(
         f"({total_samples_plan} per mesh); "
         f"resuming after {resume_slots} matching sample(s) at index {sample_idx}."
     )
+    print(
+        "Resume decision: "
+        f"matched_current_request={len(completed_for_request)}, "
+        f"skipped_planned_slots={resume_slots}, "
+        f"next_sample_index={sample_idx}."
+    )
+    if workers > 1:
+        source_paths = {
+            path.stem: path
+            for path in Path(input_dir).iterdir()
+            if path.is_file() and path.suffix.lower() == ".obj"
+        }
+        task_config = {
+            "patch_radius_ratio": patch_radius_ratio,
+            "smoothing_iterations": smoothing_iterations,
+            "group_candidates": group_candidates,
+            "roi_vertex_ratio": roi_vertex_ratio,
+            "max_ratio": max_ratio,
+            "ring_size": ring_size,
+            "deform_method": deform_method,
+            "alpha": alpha,
+            "max_iter": max_iter,
+            "repair_holes": repair_holes,
+            "drop_non_watertight": drop_non_watertight,
+            "signal_type": signal_type,
+            "signal_sigma": signal_sigma,
+            "signal_sigma_ani": signal_sigma_ani,
+            "signal_sigma_u": signal_sigma_u,
+            "signal_sigma_v": signal_sigma_v,
+            "signal_sigma_ratio": signal_sigma_ratio,
+            "signal_amplitude": signal_amplitude,
+            "signal_num_centers": signal_num_centers,
+            "signal_sigma_variation_percent": signal_sigma_variation_percent,
+            "signal_amplitude_variation_percent": signal_amplitude_variation_percent,
+            "param_method": param_method,
+            "cem_eps": cem_eps,
+            "cem_max_iters": cem_max_iters,
+            "cem_verbose": cem_verbose,
+            "mnist_percentage": mnist_percentage,
+            "mnist_total_count": mnist_total_count,
+        }
+        tasks: List[Dict[str, Any]] = []
+        planned_slot = 0
+        next_index = sample_idx
+        for mesh_name, _ in mesh_pairs:
+            source_path = source_paths.get(mesh_name)
+            if source_path is None:
+                raise FileNotFoundError(f"could not find source mesh for {mesh_name}")
+            for case_name in deformation_cases:
+                for center_count in signal_centers_options:
+                    for _ in range(samples_per_center_and_case):
+                        if planned_slot < resume_slots:
+                            planned_slot += 1
+                            continue
+                        task_seed = int(np.random.SeedSequence([seed, planned_slot]).generate_state(1)[0])
+                        tasks.append({
+                            "sample_id": _make_sample_id(next_index, template_name=mesh_name),
+                            "sample_index": next_index,
+                            "seed": task_seed,
+                            "source_mesh": str(source_path.resolve()),
+                            "template_id": mesh_name,
+                            "deformation_case": case_name,
+                            "signal_num_centers": center_count,
+                            "mnist_index": mnist_index_offset + planned_slot,
+                            "config": task_config,
+                        })
+                        next_index += 1
+                        planned_slot += 1
+        if tasks:
+            print(
+                f"Submitting {len(tasks)} sample(s) to {workers} worker process(es): "
+                f"{tasks[0]['sample_id']} through {tasks[-1]['sample_id']}."
+            )
+        else:
+            print("All planned samples are already complete; no worker jobs will be submitted.")
+        return _generate_dataset_parallel(
+            tasks=tasks,
+            workers=workers,
+            output_root=output_root,
+            log_path=log_path,
+            create_splits=create_splits,
+            split_tasks=split_tasks,
+            num_folds=num_folds,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            split_seed=split_seed,
+            group_by_template=group_by_template,
+        )
     mnist_index_iter: Optional[Iterator[int]] = None
     if signal_type == "mnist":
         if total_samples_plan > total_mnist_count:
             raise ValueError(
                 f"Requested {total_samples_plan} MNIST samples, but dataset has {total_mnist_count} images"
             )
-        mnist_index_iter = iter(range(resume_slots, total_samples_plan))
+        mnist_index_iter = iter(range(mnist_index_offset + resume_slots, mnist_index_offset + total_samples_plan))
 
     planned_slot = 0
     for mesh_name, template_mesh in mesh_pairs:
@@ -2550,6 +2791,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of sample-generation worker processes (1 keeps sequential generation).",
+    )
+    parser.add_argument(
         "--no-resume",
         dest="resume",
         action="store_false",
@@ -2610,6 +2857,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         drop_non_watertight=args.drop_non_watertight,
         offset_sample_counter=0,
         resume=args.resume,
+        workers=args.workers,
     )
 
 

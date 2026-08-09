@@ -94,6 +94,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Alpha              : {args.alpha}")
     print(f"  Max iter           : {args.max_iter}")
     print(f"  Seed               : {args.seed}")
+    print(f"  Workers            : {args.workers}")
     print(f"  Repair holes       : {not args.no_repair_holes}")
     print(f"  Drop non-watertight: {args.drop_non_watertight}")
     print(f"  Param method       : {args.param_method}")
@@ -169,6 +170,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         drop_non_watertight=args.drop_non_watertight,
         offset_sample_counter=0,
         resume=args.resume,
+        workers=args.workers,
         mnist_percentage=args.mnist_percentage if hasattr(args, 'mnist_percentage') else 100.0,
         mnist_total_count=args.mnist_total_count if hasattr(args, 'mnist_total_count') else None,
     )
