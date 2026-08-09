@@ -268,7 +268,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
 
             signal, signal_meta, warnings = _build_signal(
-                dataname=args.dataname,
+                # ``--faust-dir`` selects FAUST mode even when the optional
+                # ``--dataname`` flag retains its generic default.  Use the
+                # same resolved mode here as was used for input discovery.
+                dataname=dataname_norm,
                 sample_name=sample_name,
                 mesh_vertices=np.asarray(mesh.vertices, dtype=np.float32),
             )
@@ -288,7 +291,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "deformation_case": "case1_no",
                 "random_seed": 0,
                 "metadata": {
-                    "dataname": args.dataname,
+                    "dataname": dataname_norm,
                     "created_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "source_mesh": str(mesh_src_path.name),
                 },
