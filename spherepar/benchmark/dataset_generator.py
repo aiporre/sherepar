@@ -63,6 +63,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import expm_multiply
 import trimesh
 import trimesh.smoothing
 
@@ -143,7 +145,34 @@ DEFORMATION_CASES: Dict[str, Dict[str, Any]] = {
         "smooth_iterations": (5, 15),
         "ring_size": (2, 5),
     },
+    "case4_noise": {
+        "max_ratio": (0.0, 0.0),
+        "num_candidates": (0, 0),
+        "group_candidates": (1, 1),
+        "alpha": (0.0, 0.0),
+        "smooth_iterations": (0, 0),
+        "ring_size": (0, 0),
+    },
+    "case5_small_noise": {
+        "max_ratio": (0.1, 0.3),
+        "num_candidates": (5, 10),
+        "group_candidates": (1, 5),
+        "alpha": (0.2, 0.6),
+        "smooth_iterations": (5, 15),
+        "ring_size": (1, 3),
+    },
+    "case6_large_noise": {
+        "max_ratio": (0.2, 0.4),
+        "num_candidates": (10, 15),
+        "group_candidates": (1, 5),
+        "alpha": (0.2, 0.6),
+        "smooth_iterations": (5, 15),
+        "ring_size": (2, 5),
+    },
 }
+
+NOISE_CASES = {"case4_noise", "case5_small_noise", "case6_large_noise"}
+NOISE_ONLY_CASES = {"case4_noise"}
 
 
 # ===========================================================================
@@ -533,6 +562,84 @@ def smooth_and_validate_mesh(
         quality["validation_error"] = "non_watertight"
         return None, quality
     return mesh, quality
+
+
+def _validate_noise_mesh(
+        vertices: np.ndarray,
+        faces: np.ndarray,
+) -> Tuple[Optional[trimesh.Trimesh], Dict[str, Any]]:
+    """Validate a noise-deformed mesh without changing its face set."""
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    areas = mesh.area_faces
+    degenerate_face_count = int(np.count_nonzero(areas <= 0.0))
+    quality: Dict[str, Any] = {
+        "degenerate_face_count": degenerate_face_count,
+        "is_watertight": bool(mesh.is_watertight),
+    }
+    if degenerate_face_count > 0:
+        quality["validation_error"] = "degenerate_faces"
+        return None, quality
+    if not quality["is_watertight"]:
+        quality["validation_error"] = "non_watertight"
+        return None, quality
+    return mesh, quality
+
+
+def apply_gaussian_smoothed_vertex_noise(
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        noise_sigma: float,
+        noise_smooth_sigma: float,
+        rng: np.random.Generator,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Add IID vertex noise filtered by a mesh graph heat kernel.
+
+    The heat operator acts on the sampled displacement, rather than on the
+    vertex coordinates, so smoothing does not shrink the source shape.  Edge
+    weights are inverse squared edge lengths, which makes the heat scale use
+    the mesh coordinate units.
+    """
+    if noise_sigma < 0.0:
+        raise ValueError("noise_sigma must be non-negative")
+    if noise_smooth_sigma < 0.0:
+        raise ValueError("noise_smooth_sigma must be non-negative")
+
+    V = np.asarray(vertices, dtype=np.float64)
+    F = np.asarray(faces, dtype=np.int64)
+    if V.ndim != 2 or V.shape[1] != 3:
+        raise ValueError("vertices must have shape (N, 3)")
+    if F.ndim != 2 or F.shape[1] != 3:
+        raise ValueError("faces must have shape (M, 3)")
+    if len(V) == 0 or len(F) == 0:
+        raise ValueError("vertices and faces must be non-empty")
+
+    raw_displacement = rng.normal(0.0, noise_sigma, size=V.shape)
+    if noise_sigma == 0.0 or noise_smooth_sigma == 0.0:
+        smoothed_displacement = raw_displacement
+    else:
+        edges = np.vstack((F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]))
+        edges = np.unique(np.sort(edges, axis=1), axis=0)
+        edge_vectors = V[edges[:, 0]] - V[edges[:, 1]]
+        edge_sq_lengths = np.einsum("ij,ij->i", edge_vectors, edge_vectors)
+        if np.any(edge_sq_lengths <= 1e-16):
+            raise ValueError("cannot build noise smoothing graph with zero-length edges")
+        weights = 1.0 / edge_sq_lengths
+        row = np.concatenate((edges[:, 0], edges[:, 1]))
+        col = np.concatenate((edges[:, 1], edges[:, 0]))
+        data = np.concatenate((weights, weights))
+        adjacency = sparse.csr_matrix((data, (row, col)), shape=(len(V), len(V)))
+        laplacian = sparse.diags(np.asarray(adjacency.sum(axis=1)).ravel()) - adjacency
+        heat_time = 0.5 * noise_smooth_sigma ** 2
+        smoothed_displacement = expm_multiply((-heat_time) * laplacian, raw_displacement)
+
+    return V + smoothed_displacement, {
+        "type": "gaussian_smoothed_vertex_noise",
+        "noise_sigma": float(noise_sigma),
+        "noise_smooth_sigma": float(noise_smooth_sigma),
+        "smoothing_method": "edge_length_weighted_graph_heat_kernel",
+        "filter_target": "vertex_displacement",
+        "face_connectivity": "preserved",
+    }
 
 
 # ===========================================================================
@@ -1631,6 +1738,8 @@ def generate_dataset(
         n_samples_per_mesh: int = 25,
         patch_radius_ratio: float = 0.15,
         smoothing_iterations: int = 3,
+        noise_sigma: float = 0.01,
+        noise_smooth_sigma: float = 1.0,
         group_candidates: int = 5,
         roi_vertex_ratio: float = 0.3,
         max_ratio: float = 0.8,
@@ -1708,6 +1817,10 @@ def generate_dataset(
         raise ValueError("ring_size must be non-negative")
     if signal_sigma <= 0.0:
         raise ValueError("signal_sigma must be positive")
+    if noise_sigma < 0.0:
+        raise ValueError("noise_sigma must be non-negative")
+    if noise_smooth_sigma < 0.0:
+        raise ValueError("noise_smooth_sigma must be non-negative")
     if signal_num_centers <= 0:
         raise ValueError("signal_num_centers must be positive")
     if signal_type not in (None, "isotropic", "anisotropic", "mnist"):
@@ -1831,6 +1944,8 @@ def generate_dataset(
         task_config = {
             "patch_radius_ratio": patch_radius_ratio,
             "smoothing_iterations": smoothing_iterations,
+            "noise_sigma": noise_sigma,
+            "noise_smooth_sigma": noise_smooth_sigma,
             "group_candidates": group_candidates,
             "roi_vertex_ratio": roi_vertex_ratio,
             "max_ratio": max_ratio,
@@ -1958,12 +2073,58 @@ def generate_dataset(
                         sample_seed = seed
                         sample_rng = rng
                         sampled_cfg = _sample_deformation_config(case_name, rng)
+                        noise_meta: Dict[str, Any] = {}
+
+                    elif case_name in NOISE_ONLY_CASES:
+                        sample_seed = seed
+                        sample_rng = rng
+                        sampled_cfg = _sample_deformation_config(case_name, sample_rng)
+                        handle_ids = []
+                        handle_positions = []
+                        displacements = []
+                        target_positions = []
+                        deform_meta = {}
+                        try:
+                            noisy_vertices, noise_meta = apply_gaussian_smoothed_vertex_noise(
+                                mesh.vertices,
+                                mesh.faces,
+                                noise_sigma=noise_sigma,
+                                noise_smooth_sigma=noise_smooth_sigma,
+                                rng=sample_rng,
+                            )
+                            deformed, quality = _validate_noise_mesh(noisy_vertices, mesh.faces)
+                        except Exception as exc:  # noqa: BLE001
+                            append_error_log(
+                                log_path,
+                                mesh_name,
+                                f"noise deformation failed: {exc}",
+                                template_id=mesh_name,
+                                deformation_case=case_name,
+                                traceback_text=traceback.format_exc(),
+                            )
+                            total_failed += 1
+                            continue
+                        if deformed is None:
+                            append_error_log(
+                                log_path,
+                                mesh_name,
+                                "noise deformation produced an invalid mesh "
+                                f"(watertight={quality.get('is_watertight')}, "
+                                f"degenerate_faces={quality.get('degenerate_face_count')}, "
+                                f"reason={quality.get('validation_error', 'unknown')})",
+                                template_id=mesh_name,
+                                deformation_case=case_name,
+                            )
+                            total_failed += 1
+                            continue
+                        deformation_failed = False
                         
                     else:
                         # Deformation cases (case2_small, case3_large)
                         sample_seed = seed
                         sample_rng = rng
                         sampled_cfg = _sample_deformation_config(case_name, sample_rng)
+                        noise_meta = {}
 
                         # the number of candidates means I will deform as many times the candidates says.
                         num_candidates = min(int(sampled_cfg["num_candidates"]), number_vertices)
@@ -2114,6 +2275,44 @@ def generate_dataset(
                             os.unlink(tmp_path)
                             continue
 
+                        if case_name in NOISE_CASES:
+                            try:
+                                noisy_vertices, noise_meta = apply_gaussian_smoothed_vertex_noise(
+                                    deformed.vertices,
+                                    deformed.faces,
+                                    noise_sigma=noise_sigma,
+                                    noise_smooth_sigma=noise_smooth_sigma,
+                                    rng=sample_rng,
+                                )
+                                deformed, quality = _validate_noise_mesh(noisy_vertices, deformed.faces)
+                            except Exception as exc:  # noqa: BLE001
+                                append_error_log(
+                                    log_path,
+                                    mesh_name,
+                                    f"post-graphop noise deformation failed: {exc}",
+                                    template_id=mesh_name,
+                                    deformation_case=case_name,
+                                    traceback_text=traceback.format_exc(),
+                                )
+                                total_failed += 1
+                                _safe_unlink(tmp_path)
+                                continue
+                            if deformed is None:
+                                append_error_log(
+                                    log_path,
+                                    mesh_name,
+                                    "post-graphop noise produced an invalid mesh "
+                                    f"(watertight={quality.get('is_watertight')}, "
+                                    f"degenerate_faces={quality.get('degenerate_face_count')}, "
+                                    f"reason={quality.get('validation_error', 'unknown')})",
+                                    template_id=mesh_name,
+                                    deformation_case=case_name,
+                                )
+                                total_failed += 1
+                                _safe_unlink(tmp_path)
+                                continue
+                            deformed.export(str(tmp_path))
+
                     sample_name = _make_sample_id(sample_idx, template_name=mesh_name)
                     sample_idx += 1
                     mnist_index: Optional[int] = None
@@ -2125,8 +2324,8 @@ def generate_dataset(
                         except StopIteration as exc:
                             raise RuntimeError("MNIST index sequence exhausted") from exc
                     
-                    # For case1_no, create a temporary file with the original mesh (wasn't created during deformation)
-                    if case_name == "case1_no":
+                    # These cases do not call graphop, but signal factories still require a mesh path.
+                    if case_name in {"case1_no", *NOISE_ONLY_CASES}:
                         with tempfile.NamedTemporaryFile(
                                 suffix=".obj", delete=False, mode="w"
                         ) as tmp:
@@ -2168,6 +2367,11 @@ def generate_dataset(
                     
                     generation_meta: Dict[str, Any] = {
                         "deformation": {
+                            "type": (
+                                "none" if case_name == "case1_no"
+                                else "noise_smooth" if case_name in NOISE_CASES
+                                else "graphop"
+                            ),
                             "max_ratio": float(sampled_cfg["max_ratio"]),
                             "num_candidates": int(sampled_cfg["num_candidates"]),
                             "group_candidates": bool(sampled_cfg["group_candidates"]),
@@ -2191,6 +2395,8 @@ def generate_dataset(
                         "parametrization_method": None if case_name == "case1_no" else param_method,
                         "warnings": warnings,
                     }
+                    if case_name in NOISE_CASES:
+                        generation_meta["deformation"].update(_json_safe(noise_meta))
 
                     try:
                         # If a signal is requested, generate both isotropic and anisotropic
@@ -2700,6 +2906,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-samples-per-mesh", type=int, default=25, help="Number of deformation samples to attempt per input mesh.")
     parser.add_argument("--patch-radius-ratio", type=float, default=0.15, help="Patch radius as a fraction of the mesh bounding-box diagonal.")
     parser.add_argument("--smoothing-iterations", type=int, default=3, help="Base smoothing passes (overridden by deformation case configuration).")
+    parser.add_argument(
+        "--noise-sigma",
+        type=float,
+        default=0.01,
+        help="IID XYZ vertex-noise standard deviation in mesh coordinate units (noise cases only).",
+    )
+    parser.add_argument(
+        "--noise-smooth-sigma",
+        type=float,
+        default=1.0,
+        help="Graph heat-kernel smoothing scale in mesh edge-length units (noise cases only).",
+    )
     parser.add_argument("--group-candidates", type=int, default=5, help="Legacy parameter kept for backward compatibility.")
     parser.add_argument(
         "--roi-vertex-ratio",
@@ -2773,7 +2991,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--deformation-cases",
         type=str,
         default="case2_small,case3_large",
-        help="Comma-separated deformation cases to generate (subset of: case2_small, case3_large).",
+        help=(
+            "Comma-separated deformation cases to generate (subset of: "
+            "case1_no, case2_small, case3_large, case4_noise, "
+            "case5_small_noise, case6_large_noise)."
+        ),
     )
     parser.add_argument("--create-splits", action="store_true", help="Build task-specific fold split files after generation.")
     parser.add_argument("--num-folds", type=int, default=5, help="Number of folds to generate.")
@@ -2824,6 +3046,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         n_samples_per_mesh=args.n_samples_per_mesh,
         patch_radius_ratio=args.patch_radius_ratio,
         smoothing_iterations=args.smoothing_iterations,
+        noise_sigma=args.noise_sigma,
+        noise_smooth_sigma=args.noise_smooth_sigma,
         group_candidates=args.group_candidates,
         roi_vertex_ratio=args.roi_vertex_ratio,
         max_ratio=args.max_ratio,

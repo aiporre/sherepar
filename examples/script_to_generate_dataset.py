@@ -76,6 +76,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Samples/mesh      : {args.n_samples_per_mesh}")
     print(f"  Patch radius ratio: {args.patch_radius_ratio}")
     print(f"  Smoothing iters    : {args.smoothing_iterations}")
+    print(f"  Noise sigma        : {args.noise_sigma}")
+    print(f"  Noise smooth sigma : {args.noise_smooth_sigma}")
     print(f"  Group candidates   : {args.group_candidates}")
     print(f"  ROI vertex ratio   : {args.roi_vertex_ratio}")
     print(f"  Max ratio          : {args.max_ratio}")
@@ -134,6 +136,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         n_samples_per_mesh=args.n_samples_per_mesh,
         patch_radius_ratio=args.patch_radius_ratio,
         smoothing_iterations=args.smoothing_iterations,
+        noise_sigma=args.noise_sigma,
+        noise_smooth_sigma=args.noise_smooth_sigma,
         group_candidates=args.group_candidates,
         roi_vertex_ratio=args.roi_vertex_ratio,
         max_ratio=args.max_ratio,
