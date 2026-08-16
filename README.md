@@ -102,6 +102,33 @@ pip install rtree
 
 # Data generation
 
+## Noise deformation cases
+
+`examples/script_to_generate_dataset.py` also supports spatially correlated
+vertex-noise cases. All noise-case outputs are validated as watertight and
+retain the face connectivity from the repaired/deformed input mesh.
+
+- `case4_noise`: noise only; no graphop deformation is applied.
+- `case5_small_noise`: the `case2_small` graphop deformation followed by noise.
+- `case6_large_noise`: the `case3_large` graphop deformation followed by noise.
+
+The noise is independent Gaussian displacement in each XYZ coordinate. Its
+displacement field, rather than the mesh coordinates themselves, is smoothed
+with an edge-length-weighted graph heat kernel:
+
+```bash
+python examples/script_to_generate_dataset.py \
+    data/meshes \
+    --output-root data/generated_noise \
+    --deformation-cases case4_noise,case5_small_noise,case6_large_noise \
+    --noise-sigma 0.01 \
+    --noise-smooth-sigma 1.0
+```
+
+- `--noise-sigma`: standard deviation in mesh coordinate units (default `0.01`).
+- `--noise-smooth-sigma`: graph heat-kernel scale in edge-length units
+  (default `1.0`).
+
 ## Importing existing meshes (generic and FAUST)
 
 Use `examples/script_to_generate_dataset_from_obj.py` when the input meshes
@@ -241,7 +268,7 @@ Current schema is `schema_version: "0.2"`.
 | `dataset_name` | `str` | Dataset logical name. |
 | `dataset_version` | `str` | Dataset format version. |
 | `template_id` | `str` | Source template mesh id. |
-| `deformation_case` | `str` | Case name (`case1_no`, `case2_small`, `case3_large`). |
+| `deformation_case` | `str` | Case name (`case1_no` through `case6_large_noise`). |
 | `created_by` | `str` | Generator script identifier. |
 | `random_seed` | `int` | Sample seed used for reproducibility. |
 
