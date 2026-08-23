@@ -16,7 +16,8 @@ Usage
 
 See --help for the full list of options.
 
-The script reads every .obj from --input, runs the full pipeline
+The script reads every supported mesh (`.obj`, `.off`, `.ply`, or `.stl`) from
+--input, runs the full pipeline
 (repair → deform → smooth → validate → signal → stats → save), and writes
 results under --output::
 
@@ -93,6 +94,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Signal amp var %   : {args.signal_amplitude_variation}")
     print(f"  Signal amplitude   : {args.signal_amplitude}")
     print(f"  Signal centers     : {args.signal_num_centers}")
+    print(f"  Fixed signal center: {args.signal_center}")
     print(f"  Alpha              : {args.alpha}")
     print(f"  Max iter           : {args.max_iter}")
     print(f"  Seed               : {args.seed}")
@@ -156,6 +158,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         signal_amplitude=args.signal_amplitude,
         signal_num_centers=args.signal_num_centers,
         signal_centers_options=signal_centers_options,
+        signal_center=args.signal_center,
         param_method=param_method,
         cem_eps=args.cem_eps,
         cem_max_iters=args.cem_max_iters,

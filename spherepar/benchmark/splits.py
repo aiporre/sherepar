@@ -13,6 +13,7 @@ TASK_CENTER_REGRESSION = "center_regression"
 TASK_SIGMA_REGRESSION = "sigma_regression"
 TASK_AMPLITUDE_REGRESSION = "amplitude_regression"
 TASK_MNIST_CLS = "mnist_cls"
+TASK_MODELNET40_CLS = "modelnet40_cls"
 
 DEFAULT_TASKS = [
     TASK_NUMBER_OF_CENTERS,
@@ -47,12 +48,20 @@ def is_valid_for_mnist_cls(label: Dict[str, Any]) -> bool:
     return False
 
 
+def is_valid_for_modelnet40_cls(label: Dict[str, Any]) -> bool:
+    task_entry = label.get("tasks", {}).get(TASK_MODELNET40_CLS, {})
+    if not isinstance(task_entry, dict) or task_entry.get("valid") is not True:
+        return False
+    return isinstance(task_entry.get("label"), int)
+
+
 TASK_FILTERS = {
     TASK_NUMBER_OF_CENTERS: is_valid_for_number_of_centers,
     TASK_CENTER_REGRESSION: is_valid_for_center_regression,
     TASK_SIGMA_REGRESSION: is_valid_for_sigma_regression,
     TASK_AMPLITUDE_REGRESSION: is_valid_for_amplitude_regression,
     TASK_MNIST_CLS: is_valid_for_mnist_cls,
+    TASK_MODELNET40_CLS: is_valid_for_modelnet40_cls,
 }
 
 
@@ -173,6 +182,21 @@ def _mnist_native_split(records: Sequence[Dict[str, Any]]) -> Tuple[List[str], L
     return train_ids, val_ids, test_ids
 
 
+def _modelnet40_native_split(records: Sequence[Dict[str, Any]]) -> Tuple[List[str], List[str], List[str]]:
+    """Preserve ModelNet40's supplied train/test partition."""
+    train_ids = sorted(
+        str(rec["sample_id"])
+        for rec in records
+        if rec.get("metadata", {}).get("source_split") == "train"
+    )
+    test_ids = sorted(
+        str(rec["sample_id"])
+        for rec in records
+        if rec.get("metadata", {}).get("source_split") == "test"
+    )
+    return train_ids, [], test_ids
+
+
 def build_task_splits(
     dataset_root: str,
     tasks: Iterable[str] | None = None,
@@ -182,6 +206,7 @@ def build_task_splits(
     test_ratio: float = 0.15,
     seed: int = 0,
     group_by_template: bool = True,
+    modelnet40_native_split: bool = False,
 ) -> Dict[str, Any]:
     """Build and save per-task fold split files under dataset_root/folds."""
     if tasks is None:
@@ -215,6 +240,9 @@ def build_task_splits(
         if task_name == TASK_MNIST_CLS:
             train_ids, val_ids, test_ids = _mnist_native_split(valid)
             folds = [(train_ids, val_ids, test_ids) for _ in range(num_folds)]
+        elif task_name == TASK_MODELNET40_CLS and modelnet40_native_split:
+            train_ids, val_ids, test_ids = _modelnet40_native_split(valid)
+            folds = [(train_ids, val_ids, test_ids) for _ in range(num_folds)]
         else:
             folds = _grouped_split(
                 records=valid,
@@ -238,6 +266,8 @@ def build_task_splits(
             task_summary["class_counts"] = counts
         if task_name == TASK_MNIST_CLS:
             task_summary["split_source"] = "mnist_default"
+        if task_name == TASK_MODELNET40_CLS and modelnet40_native_split:
+            task_summary["split_source"] = "modelnet40_native"
 
         for fold_idx, (train_ids, val_ids, test_ids) in enumerate(folds, start=1):
             task_dir = folds_dir / f"fold{fold_idx}" / task_name

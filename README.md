@@ -129,18 +129,42 @@ python examples/script_to_generate_dataset.py \
 - `--noise-smooth-sigma`: graph heat-kernel scale in edge-length units
   (default `1.0`).
 
-## Importing existing meshes (generic and FAUST)
+## Fixed regression-signal centre
 
-Use `examples/script_to_generate_dataset_from_obj.py` when the input meshes
+Use `--signal-center "X,Y,Z"` to select the nearest vertex to an XYZ point on
+each repaired input template. The selected vertex index is reused across all
+deformed samples from that template:
+
+```bash
+python examples/script_to_generate_dataset.py \
+    data/meshes \
+    --output-root data/generated_fixed_center \
+    --signal-center "0.2,-0.5,1.0"
+```
+
+The option fixes only the one-centre isotropic regression signal
+(`iso_001_reg` / `iso_001_cls`) and its paired anisotropic signal (`aniso_001`).
+Multi-centre isotropic classification signals remain random. If the selected
+vertex cannot form a valid anisotropic fixed-gauge frame after deformation, the
+generator logs and skips that sample rather than selecting another centre.
+
+## Importing existing mesh files
+
+Use `examples/script_to_generate_dataset_from_files.py` when the input meshes
 already exist and should be copied into the dataset layout without deformation.
 For every supported input mesh (`.obj`, `.ply`, `.stl`, or `.off`), it writes a
 mesh OBJ, one per-vertex signal array, one label JSON, and a spherical
 parametrization (FLASH by default, or CEM).
 
+Both parametrization methods require a single closed genus-0 surface. The
+importer always skips open, disconnected, and non-genus-0 meshes before any
+dataset artifacts are written; the final summary reports how many were
+filtered.
+
 Generic meshes receive an all-zero `float32` signal with one value per vertex:
 
 ```bash
-python examples/script_to_generate_dataset_from_obj.py \
+python examples/script_to_generate_dataset_from_files.py \
     --input-dir data/source_meshes \
     --output-root data/imported_meshes
 ```
@@ -148,7 +172,7 @@ python examples/script_to_generate_dataset_from_obj.py \
 For FAUST, point `--faust-dir` at the FAUST root containing `registrations/`:
 
 ```bash
-python examples/script_to_generate_dataset_from_obj.py \
+python examples/script_to_generate_dataset_from_files.py \
     --faust-dir /path/to/FAUST \
     --output-root data/imported_faust
 ```
@@ -159,6 +183,46 @@ required. In this mode the signal is the `float32` vertex index array
 vertex ordering is therefore part of the signal definition. These imported
 datasets contain one `main` signal per mesh, rather than the isotropic and
 anisotropic Gaussian signal set produced by `script_to_generate_dataset.py`.
+
+Cylinders uses a flat input directory and the same zero-valued signal:
+
+```bash
+python examples/script_to_generate_dataset_from_files.py \
+    --cylinders-dir /path/to/cylinders \
+    --output-root data/imported_cylinders
+```
+
+For ModelNet40, point to the root arranged as
+`<class_name>/{train,test}/*.off`. At the default `--percentage 100`, its
+provided train/test partitions are preserved in `folds/*/modelnet40_cls/` and
+the validation files are empty. A smaller percentage samples each class
+reproducibly and creates standard folds instead:
+
+Preserve the supplied ModelNet40 split:
+
+```bash
+python examples/script_to_generate_dataset_from_files.py \
+    --modelnet40-dir /path/to/ModelNet40 \
+    --percentage 100 \
+    --output-root data/imported_modelnet40
+```
+
+Create normal folds from a reproducible 25% per-class subset:
+
+```bash
+python examples/script_to_generate_dataset_from_files.py \
+    --modelnet40-dir /path/to/ModelNet40 \
+    --percentage 25 \
+    --num-folds 5 \
+    --split-seed 42 \
+    --output-root data/imported_modelnet40_25pct
+```
+
+Count the generated ModelNet40 class distribution:
+
+```bash
+python examples/count_modelnet40_classes.py data/imported_modelnet40
+```
 
 ## MNIST
 
@@ -249,7 +313,7 @@ Current schema is `schema_version: "0.2"`.
 | `sample_id` | `str` | Unique sample identifier (`<template>_sXXXXXX`). |
 | `name` | `str` | Same as `sample_id`. |
 | `metadata` | `object` | Dataset-level metadata (name/version/template/case/seed). |
-| `paths` | `object` | Relative paths for mesh and label file. |
+| `paths` | `object` | Canonical dataset-root-relative artifact paths. |
 | `mesh` | `object` | Mesh stats and geometry metadata. |
 | `signal_files` | `object` | Mapping of signal keys to `.npy` files. |
 | `signals` | `array` | Per-signal metadata entries (isotropic + anisotropic). |
@@ -259,7 +323,7 @@ Current schema is `schema_version: "0.2"`.
 | `parametrization` | `object` | Spherical parametrization status (`method`, `success`, `error`). |
 | `random_seed` | `int` | Per-sample seed. |
 | `warnings` | `array` | Generation warnings, if any. |
-| `sphere_path` | `str \| null` | Relative path to generated sphere mesh when available. |
+| `sphere_path` | `str` | Expected relative path to the sphere mesh; check `parametrization.success` before loading it. |
 
 ### `metadata`
 
@@ -277,7 +341,14 @@ Current schema is `schema_version: "0.2"`.
 | Field | Type | Meaning |
 |---|---|---|
 | `mesh` | `str` | Relative path to sample OBJ (for example `meshes/...obj`). |
+| `signal` | `str` | Canonical signal path (`iso_001_reg` for dual-Gaussian labels). |
 | `label` | `str` | Relative path to this JSON label. |
+| `sphere` | `str` | Expected relative path to the spherical parametrization OBJ. |
+| `spherical_label` | `str` | Expected relative path to the spherical-parametrization metadata JSON. |
+
+The flat `mesh_path`, `signal_path`, `label_path`, and `sphere_path` fields
+mirror these canonical paths for compatibility. Use `parametrization.success`
+to determine whether the sphere artifacts were actually created.
 
 ### `mesh`
 

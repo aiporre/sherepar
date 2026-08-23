@@ -18,6 +18,7 @@ from spherepar.benchmark.signals import (
 )
 from spherepar.benchmark.dataset_generator import (
     load_meshes_from_directory,
+    genus_zero_filter_reason,
     repair_mesh_if_needed,
     compute_sampling_cube_from_volume,
     sample_handle_centers,
@@ -34,6 +35,7 @@ from spherepar.benchmark.dataset_generator import (
 from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.splits import (
     build_task_splits,
+    TASK_MODELNET40_CLS,
     is_valid_for_number_of_centers,
     is_valid_for_center_regression,
     is_valid_for_sigma_regression,
@@ -48,6 +50,7 @@ __all__ = [
     "anisotropic_gaussian",
     # dataset generator
     "load_meshes_from_directory",
+    "genus_zero_filter_reason",
     "repair_mesh_if_needed",
     "compute_sampling_cube_from_volume",
     "sample_handle_centers",
@@ -62,6 +65,7 @@ __all__ = [
     "append_error_log",
     "generate_dataset",
     "build_task_splits",
+    "TASK_MODELNET40_CLS",
     "is_valid_for_number_of_centers",
     "is_valid_for_center_regression",
     "is_valid_for_sigma_regression",

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from spherepar.benchmark.dataset_generator import (
+    add_path_labels,
     build_arg_parser,
     generate_dataset,
     _list_completed_samples,
@@ -98,3 +99,51 @@ def test_workers_cli_flag_defaults_to_one_and_accepts_parallelism():
 def test_workers_must_be_positive():
     with pytest.raises(ValueError, match="workers must be at least 1"):
         generate_dataset("unused", workers=0)
+
+
+def test_add_path_labels_normalizes_dual_signal_label(tmp_path: Path):
+    root = tmp_path / "generated"
+    labels = root / "labels"
+    labels.mkdir(parents=True)
+    label_path = labels / "template_s000000.json"
+    label_path.write_text(json.dumps({
+        "sample_id": "template_s000000",
+        "signal_files": {
+            "iso_002": "signals/template_s000000_iso_000.npy",
+            "iso_001_reg": "signals/template_s000000_iso_001.npy",
+            "aniso_001": "signals/template_s000000_aniso_000.npy",
+        },
+    }))
+
+    normalized = add_path_labels(str(label_path), str(root))
+
+    assert normalized["paths"] == {
+        "mesh": "meshes/template_s000000.obj",
+        "signal": "signals/template_s000000_iso_001.npy",
+        "label": "labels/template_s000000.json",
+        "sphere": "spheres/template_s000000.obj",
+        "spherical_label": "labels/template_s000000_spherical.json",
+    }
+    assert normalized["mesh_path"] == normalized["paths"]["mesh"]
+    assert normalized["signal_path"] == normalized["paths"]["signal"]
+    assert normalized["label_path"] == normalized["paths"]["label"]
+    assert normalized["sphere_path"] == normalized["paths"]["sphere"]
+
+
+def test_add_path_labels_uses_mnist_signal_and_updates_legacy_aliases(tmp_path: Path):
+    root = tmp_path / "generated"
+    labels = root / "labels"
+    labels.mkdir(parents=True)
+    label_path = labels / "mnist_s000000.json"
+    label_path.write_text(json.dumps({
+        "sample_id": "mnist_s000000",
+        "mesh_file": "obsolete.obj",
+        "signal_file": "obsolete.npy",
+        "signal": {"signal_file": "signals/mnist_s000000_mnist.npy"},
+    }))
+
+    normalized = add_path_labels(str(label_path), str(root))
+
+    assert normalized["paths"]["signal"] == "signals/mnist_s000000_mnist.npy"
+    assert normalized["mesh_file"] == "meshes/mnist_s000000.obj"
+    assert normalized["signal_file"] == "signals/mnist_s000000_mnist.npy"

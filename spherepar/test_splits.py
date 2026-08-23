@@ -7,12 +7,14 @@ from spherepar.benchmark.splits import (
     TASK_AMPLITUDE_REGRESSION,
     TASK_CENTER_REGRESSION,
     TASK_MNIST_CLS,
+    TASK_MODELNET40_CLS,
     TASK_NUMBER_OF_CENTERS,
     TASK_SIGMA_REGRESSION,
     build_task_splits,
     is_valid_for_amplitude_regression,
     is_valid_for_center_regression,
     is_valid_for_mnist_cls,
+    is_valid_for_modelnet40_cls,
     is_valid_for_number_of_centers,
     is_valid_for_sigma_regression,
 )
@@ -54,6 +56,22 @@ def _write_mnist_label(
                 "label": mnist_label,
             }
         },
+    }
+    with open(labels_dir / f"{sample_id}.json", "w") as fh:
+        json.dump(data, fh)
+
+
+def _write_modelnet40_label(
+    labels_dir: Path,
+    sample_id: str,
+    class_id: int,
+    source_split: str,
+):
+    data = {
+        "sample_id": sample_id,
+        "template_id": sample_id,
+        "metadata": {"source_split": source_split},
+        "tasks": {TASK_MODELNET40_CLS: {"valid": True, "label": class_id}},
     }
     with open(labels_dir / f"{sample_id}.json", "w") as fh:
         json.dump(data, fh)
@@ -414,3 +432,29 @@ def test_mnist_cls_uses_native_train_test_split(tmp_path: Path):
         assert train_ids == ["sample_s000001", "sample_s000002"]
         assert val_ids == ["sample_s000001", "sample_s000002"]
         assert test_ids == ["sample_s000003", "sample_s000004"]
+
+
+def test_modelnet40_cls_preserves_native_train_test_split(tmp_path: Path):
+    dataset_root = tmp_path / "dataset"
+    labels_dir = dataset_root / "labels"
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    _write_modelnet40_label(labels_dir, "chair_train", 0, "train")
+    _write_modelnet40_label(labels_dir, "table_train", 1, "train")
+    _write_modelnet40_label(labels_dir, "chair_test", 0, "test")
+    _write_modelnet40_label(labels_dir, "table_test", 1, "test")
+
+    assert is_valid_for_modelnet40_cls(
+        {"tasks": {TASK_MODELNET40_CLS: {"valid": True, "label": 0}}}
+    )
+    build_task_splits(
+        dataset_root=str(dataset_root),
+        tasks=[TASK_MODELNET40_CLS],
+        num_folds=2,
+        modelnet40_native_split=True,
+    )
+
+    for fold_idx in [1, 2]:
+        base = dataset_root / "folds" / f"fold{fold_idx}" / TASK_MODELNET40_CLS
+        assert (base / "train.txt").read_text().splitlines() == ["chair_train", "table_train"]
+        assert (base / "val.txt").read_text() == ""
+        assert (base / "test.txt").read_text().splitlines() == ["chair_test", "table_test"]

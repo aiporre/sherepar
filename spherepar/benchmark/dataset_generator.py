@@ -6,7 +6,7 @@ Dataset generator for mesh-deformation training data.
 
 Pipeline
 --------
-1. Load every .obj from a directory with trimesh.
+1. Load every supported input mesh (.obj, .off, .ply, or .stl) from a directory with trimesh.
 2. Repair holes when possible (fill boundary loops).
 3. Sample deformation centers inside a cube with 110 % of the bounding-box
    volume, centered at the mesh center of mass.
@@ -60,7 +60,7 @@ import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -116,6 +116,7 @@ except ImportError:
 # Cached MNIST images (loaded on demand)
 _MNIST_IMAGES: Optional[np.ndarray] = None
 _MNIST_LABELS: Optional[np.ndarray] = None
+INPUT_MESH_EXTENSIONS = {".obj", ".off", ".ply", ".stl"}
 
 
 DEFORMATION_CASES: Dict[str, Dict[str, Any]] = {
@@ -179,6 +180,31 @@ NOISE_ONLY_CASES = {"case4_noise"}
 # 1. Mesh loading
 # ===========================================================================
 
+
+def genus_zero_filter_reason(mesh: trimesh.Trimesh) -> Optional[str]:
+    """Return why *mesh* is not a single closed genus-0 surface.
+
+    A connected, closed triangular surface has genus zero exactly when its
+    Euler characteristic is two. Connectivity is checked separately so a
+    disconnected sphere-and-torus mesh, whose combined Euler characteristic
+    can also be two, is rejected.
+    """
+    if not mesh.is_watertight:
+        return "mesh is not closed/watertight"
+
+    components = mesh.split(only_watertight=False)
+    if len(components) != 1:
+        return f"mesh has {len(components)} connected components (expected 1)"
+
+    euler_characteristic = int(mesh.euler_number)
+    if euler_characteristic != 2:
+        return (
+            "mesh has Euler characteristic "
+            f"{euler_characteristic} (expected 2 for a closed genus-0 surface)"
+        )
+    return None
+
+
 def load_meshes_from_directory(
         directory: str,
 ) -> List[Tuple[str, trimesh.Trimesh]]:
@@ -190,7 +216,8 @@ def load_meshes_from_directory(
     Parameters
     ----------
     directory:
-        Path to a directory containing mesh files.
+        Path to a directory containing ``.obj``, ``.off``, ``.ply``, or
+        ``.stl`` mesh files.
 
     Returns
     -------
@@ -200,7 +227,7 @@ def load_meshes_from_directory(
     results: List[Tuple[str, trimesh.Trimesh]] = []
 
     for mesh_path in sorted(directory.iterdir()):
-        if not mesh_path.is_file():
+        if not mesh_path.is_file() or mesh_path.suffix.lower() not in INPUT_MESH_EXTENSIONS:
             continue
         try:
             loaded = trimesh.load(str(mesh_path), force="mesh")
@@ -800,6 +827,37 @@ def _sample_deformation_config(case_name: str, rng: np.random.Generator) -> Dict
     }
 
 
+def parse_signal_center(value: str) -> Tuple[float, float, float]:
+    """Parse a CLI signal centre written as ``X,Y,Z``."""
+    try:
+        parts = [float(part.strip()) for part in value.split(",")]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("signal center must use the form X,Y,Z") from exc
+    if len(parts) != 3 or not all(np.isfinite(parts)):
+        raise argparse.ArgumentTypeError(
+            "signal center must contain exactly three finite values: X,Y,Z"
+        )
+    return (parts[0], parts[1], parts[2])
+
+
+def _normalize_signal_center(center: Optional[Sequence[float]]) -> Optional[np.ndarray]:
+    if center is None:
+        return None
+    values = np.asarray(center, dtype=float)
+    if values.shape != (3,) or not np.isfinite(values).all():
+        raise ValueError("signal_center must contain exactly three finite XYZ values")
+    return values
+
+
+def _nearest_vertex_index(vertices: np.ndarray, point: np.ndarray) -> int:
+    """Return the nearest vertex index to a finite XYZ point."""
+    V = np.asarray(vertices, dtype=float)
+    if V.ndim != 2 or V.shape[1] != 3 or len(V) == 0:
+        raise ValueError("vertices must have shape (N, 3) with N > 0")
+    distances_sq = np.einsum("ij,ij->i", V - point[None, :], V - point[None, :])
+    return int(np.argmin(distances_sq))
+
+
 def _randomize_signal_parameters(
         sigma: float,
         amplitude: float,
@@ -1013,6 +1071,7 @@ def save_sample_signal(
         signal_amplitude_values: Optional[List[float]] = None,
         signal_orientation_values: Optional[List[float]] = None,
         signal_centers: Optional[List[int]] = None,
+        strict_anisotropic_center: bool = False,
         mnist_index: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
         skip_mesh_save: bool = False,
@@ -1181,6 +1240,10 @@ def save_sample_signal(
             else:
                 signal_center_idx = rng.integers(0, len(mesh.vertices), size=signal_num_centers)
                 signal_centers = [int(idx) for idx in np.atleast_1d(signal_center_idx)]
+            if any(idx < 0 or idx >= len(mesh.vertices) for idx in signal_centers):
+                raise ValueError(
+                    f"signal center vertex index is out of range for mesh with {len(mesh.vertices)} vertices"
+                )
 
             signal_centers_coords = [np.asarray(mesh.vertices[idx], dtype=float).tolist() for idx in signal_centers]
             signal_center_ids = signal_centers
@@ -1229,6 +1292,10 @@ def save_sample_signal(
                         break
                     except ValueError as exc:
                         last_error = exc
+                        if strict_anisotropic_center:
+                            raise RuntimeError(
+                                f"fixed anisotropic center vertex {center_idx} is invalid for the fixed gauge: {exc}"
+                            ) from exc
                         center_idx = int(rng.integers(0, len(mesh.vertices)))
                         sampled_delta = None
                 if hm_info is None:
@@ -1433,6 +1500,71 @@ def _update_sample_label(
             label[key] = value
     with open(label_path, "w") as fh:
         json.dump(label, fh, indent=2)
+
+
+def add_path_labels(label_path: str, output_root: str) -> Dict[str, Any]:
+    """Normalize canonical path fields in a completed primary sample label.
+
+    This intentionally runs after all generation steps.  In dual-signal
+    labels, ``iso_001_reg`` is the singular canonical signal path; MNIST and
+    legacy labels retain their existing single signal path instead.
+    """
+    label_file = Path(label_path)
+    root_path = Path(output_root)
+    with open(label_file, "r") as fh:
+        label = json.load(fh)
+
+    sample_id = str(label.get("sample_id") or label.get("name") or label_file.stem)
+    signal_files = label.get("signal_files")
+    signal_meta = label.get("signal")
+    existing_paths = label.get("paths") if isinstance(label.get("paths"), dict) else {}
+
+    signal_rel: Optional[str] = None
+    if isinstance(signal_files, dict):
+        for key in ("iso_001_reg", "main"):
+            value = signal_files.get(key)
+            if isinstance(value, str) and value:
+                signal_rel = _to_relative_dataset_path(value, root_path)
+                break
+    if signal_rel is None and isinstance(signal_meta, dict):
+        value = signal_meta.get("signal_file")
+        if isinstance(value, str) and value:
+            signal_rel = _to_relative_dataset_path(value, root_path)
+    if signal_rel is None:
+        value = label.get("signal_file")
+        if isinstance(value, str) and value:
+            signal_rel = _to_relative_dataset_path(value, root_path)
+    if signal_rel is None:
+        for value in (existing_paths.get("signal"), label.get("signal_path")):
+            if isinstance(value, str) and value:
+                signal_rel = _to_relative_dataset_path(value, root_path)
+                break
+    if signal_rel is None:
+        raise ValueError(f"could not determine a signal path for canonical label {label_file}")
+
+    mesh_rel = f"meshes/{sample_id}.obj"
+    label_rel = f"labels/{sample_id}.json"
+    sphere_rel = f"spheres/{sample_id}.obj"
+    spherical_label_rel = f"labels/{sample_id}_spherical.json"
+    label["paths"] = {
+        "mesh": mesh_rel,
+        "signal": signal_rel,
+        "label": label_rel,
+        "sphere": sphere_rel,
+        "spherical_label": spherical_label_rel,
+    }
+    label["mesh_path"] = mesh_rel
+    label["signal_path"] = signal_rel
+    label["label_path"] = label_rel
+    label["sphere_path"] = sphere_rel
+    if "mesh_file" in label:
+        label["mesh_file"] = mesh_rel
+    if "signal_file" in label:
+        label["signal_file"] = signal_rel
+
+    with open(label_file, "w") as fh:
+        json.dump(label, fh, indent=2)
+    return label
 
 
 def validate_saved_sample(
@@ -1759,6 +1891,7 @@ def generate_dataset(
         signal_amplitude: float = 1.0,
         signal_num_centers: int = 1,
         signal_centers_options: Optional[List[int]] = None,
+        signal_center: Optional[Sequence[float]] = None,
         signal_sigma_variation_percent: float = 20.0,
         signal_amplitude_variation_percent: float = 20.0,
         param_method: Optional[str] = None,
@@ -1787,7 +1920,7 @@ def generate_dataset(
     Parameters
     ----------
     input_dir:
-        Directory containing input .obj meshes.
+        Directory containing input .obj, .off, .ply, or .stl meshes.
     output_root:
         Root directory for generated output.
     n_samples_per_mesh:
@@ -1827,6 +1960,7 @@ def generate_dataset(
         raise ValueError("signal_type must be one of None, 'isotropic', 'anisotropic', or 'mnist'")
     if signal_type is None:
         raise ValueError("signal_type cannot be None for this dataset pipeline; each sample must include a signal.")
+    fixed_signal_center = _normalize_signal_center(signal_center)
     if param_method not in (None, "flash", "cem"):
         raise ValueError("param_method must be one of None, 'flash', or 'cem'")
     
@@ -1851,7 +1985,8 @@ def generate_dataset(
     print(f"Loading meshes from: {input_dir}")
     mesh_pairs = load_meshes_from_directory(input_dir)
     if not mesh_pairs:
-        print("No .obj files found or all failed to load.")
+        supported = ", ".join(sorted(INPUT_MESH_EXTENSIONS))
+        print(f"No supported mesh files ({supported}) found or all failed to load.")
         return 0
     print(f"  Loaded {len(mesh_pairs)} mesh(es)")
     
@@ -1939,7 +2074,7 @@ def generate_dataset(
         source_paths = {
             path.stem: path
             for path in Path(input_dir).iterdir()
-            if path.is_file() and path.suffix.lower() == ".obj"
+            if path.is_file() and path.suffix.lower() in INPUT_MESH_EXTENSIONS
         }
         task_config = {
             "patch_radius_ratio": patch_radius_ratio,
@@ -1963,6 +2098,7 @@ def generate_dataset(
             "signal_sigma_ratio": signal_sigma_ratio,
             "signal_amplitude": signal_amplitude,
             "signal_num_centers": signal_num_centers,
+            "signal_center": fixed_signal_center.tolist() if fixed_signal_center is not None else None,
             "signal_sigma_variation_percent": signal_sigma_variation_percent,
             "signal_amplitude_variation_percent": signal_amplitude_variation_percent,
             "param_method": param_method,
@@ -2040,6 +2176,10 @@ def generate_dataset(
                 continue
         else:
             mesh = template_mesh
+
+        fixed_center_vertex_id: Optional[int] = None
+        if fixed_signal_center is not None:
+            fixed_center_vertex_id = _nearest_vertex_index(mesh.vertices, fixed_signal_center)
 
         # --- Geometry info --------------------------------------------------
         com, half_side = compute_sampling_cube_from_volume(mesh)
@@ -2427,19 +2567,23 @@ def generate_dataset(
                                                            signal_sigma_values=sigma_list,
                                                            signal_amplitude_values=amplitude_list,
                                                            signal_orientation_values=orientation_list,
+                                                           signal_centers=(
+                                                               [fixed_center_vertex_id]
+                                                               if fixed_center_vertex_id is not None and sample_num_centers == 1
+                                                               else None
+                                                           ),
                                                            rng=sample_rng,
                                                            skip_mesh_save=True)
 
-
-                            # Extract centers chosen for isotropic signal to match them for anisotropic
+                            # Read the main isotropic label to decide whether a separate
+                            # one-centre regression signal is needed.
                             try:
                                 with open(paths_iso["labels"], "r") as fh:
                                     label_iso = json.load(fh)
-                                iso_center_ids = label_iso.get("signal", {}).get("center_vertex_ids")
                             except Exception as exc:
                                 print(f"WARNING: Failed to read isotropic signal centers: {exc}")
                                 traceback.print_exc()
-                                iso_center_ids = None
+                                raise
 
                             # Create a single-center isotropic signal for regression (iso_001).
                             # If the main isotropic already used a single center, reuse it.
@@ -2465,8 +2609,20 @@ def generate_dataset(
                                                                      signal_sigma_values=[sigma_list[0]] if sigma_list else None,
                                                                      signal_amplitude_values=[amplitude_list[0]] if amplitude_list else None,
                                                                      signal_orientation_values=[orientation_list[0]] if orientation_list else None,
+                                                                     signal_centers=(
+                                                                         [fixed_center_vertex_id]
+                                                                         if fixed_center_vertex_id is not None else None
+                                                                     ),
                                                                      rng=sample_rng,
                                                                      skip_mesh_save=True)
+
+                            # The anisotropic regression target must always be paired
+                            # with this one-centre isotropic regression signal.
+                            with open(paths_iso_single["labels"], "r") as fh:
+                                label_iso_single = json.load(fh)
+                            regression_center_ids = label_iso_single.get("signal", {}).get("center_vertex_ids")
+                            if not regression_center_ids:
+                                raise RuntimeError("single-center isotropic signal did not record a center vertex")
 
                             # Second: anisotropic with suffix (force single center)
                             paths_aniso = save_sample_signal(root=output_root,
@@ -2491,7 +2647,8 @@ def generate_dataset(
                                                                  amplitude_list[0]] if amplitude_list else None,
                                                              signal_orientation_values=[
                                                                  orientation_list[0]] if orientation_list else None,
-                                                             signal_centers=iso_center_ids,
+                                                             signal_centers=regression_center_ids,
+                                                             strict_anisotropic_center=fixed_center_vertex_id is not None,
                                                              rng=sample_rng,
                                                              skip_mesh_save=True)
 
@@ -2533,7 +2690,17 @@ def generate_dataset(
 
                                 # build signals entries (minimal set from existing labels)
                                 sig_iso = label_iso.get("signal", {})
+                                sig_iso_reg = label_iso_single.get("signal", {})
                                 sig_aniso = label_aniso.get("signal", {})
+                                fixed_center_metadata = (
+                                    {
+                                        "method": "nearest_template_vertex",
+                                        "requested_xyz": fixed_signal_center.tolist(),
+                                        "template_vertex_id": int(fixed_center_vertex_id),
+                                    }
+                                    if fixed_center_vertex_id is not None
+                                    else None
+                                )
                                 
                                 # Extract signal parameters from the return dicts (which now include signal_params)
                                 sig_iso_params = paths_iso.get("signal_params", {})
@@ -2577,10 +2744,24 @@ def generate_dataset(
                                         "centers": sig_iso.get("centers", []),
                                         "center_vertex_ids": sig_iso.get("center_vertex_ids", []),
                                         "center_sampling": {
-                                            "method": "random_vertex",
+                                            "method": (
+                                                "nearest_template_vertex"
+                                                if fixed_center_vertex_id is not None and sample_num_centers == 1
+                                                else "random_vertex"
+                                            ),
                                             "seed": int(sample_seed),
                                             "avoid_boundary": True,
                                             "min_pairwise_distance": None,
+                                            "requested_xyz": (
+                                                fixed_signal_center.tolist()
+                                                if fixed_center_vertex_id is not None and sample_num_centers == 1
+                                                else None
+                                            ),
+                                            "template_vertex_id": (
+                                                int(fixed_center_vertex_id)
+                                                if fixed_center_vertex_id is not None and sample_num_centers == 1
+                                                else None
+                                            ),
                                         },
                                         "amplitudes": sig_iso.get("amplitudes", []),
                                         "parameters": {
@@ -2609,11 +2790,25 @@ def generate_dataset(
                                         "centers": sig_aniso.get("centers", []),
                                         "center_vertex_ids": sig_aniso.get("center_vertex_ids", []),
                                         "center_sampling": {
-                                            "method": "matched_to_signal",
-                                            "matched_signal_id": "iso_000",
+                                            "method": (
+                                                "nearest_template_vertex"
+                                                if fixed_center_vertex_id is not None
+                                                else "matched_to_signal"
+                                            ),
+                                            "matched_signal_id": "iso_001_reg",
                                             "seed": int(sample_seed),
                                             "avoid_boundary": True,
                                             "min_pairwise_distance": None,
+                                            "requested_xyz": (
+                                                fixed_signal_center.tolist()
+                                                if fixed_center_vertex_id is not None
+                                                else None
+                                            ),
+                                            "template_vertex_id": (
+                                                int(fixed_center_vertex_id)
+                                                if fixed_center_vertex_id is not None
+                                                else None
+                                            ),
                                         },
                                         "amplitudes": sig_aniso.get("amplitudes", []),
                                         "parameters": {
@@ -2649,9 +2844,9 @@ def generate_dataset(
                                         "family": "isotropic",
                                         "tasks": {
                                             "number_of_centers": {"valid": True, "label": sig_iso.get("num_centers", 1), "dtype": "int64"},
-                                            "center_regression": {"valid": True, "label": sig_iso.get("centers", [None])[0], "dtype": "float32", "target_space": "xyz"},
-                                            "sigma_regression": {"valid": True, "label": sig_iso.get("sigmas", [None])[0], "dtype": "float32", "units": "surface_distance"},
-                                            "amplitude_regression": {"valid": True, "label": sig_iso.get("amplitudes", [None])[0], "dtype": "float32"},
+                                            "center_regression": {"valid": True, "label": sig_iso_reg.get("centers", [None])[0], "dtype": "float32", "target_space": "xyz"},
+                                            "sigma_regression": {"valid": True, "label": sig_iso_reg.get("sigmas", [None])[0], "dtype": "float32", "units": "surface_distance"},
+                                            "amplitude_regression": {"valid": True, "label": sig_iso_reg.get("amplitudes", [None])[0], "dtype": "float32"},
                                         },
                                     },
                                     "anisotropic_gaussian": {
@@ -2724,6 +2919,8 @@ def generate_dataset(
                                     "random_seed": int(sample_seed),
                                     "warnings": _json_safe(generation_meta.get("warnings", [])),
                                 }
+                                if fixed_center_metadata is not None:
+                                    final_label["metadata"]["fixed_signal_center"] = fixed_center_metadata
 
                                 # Write mesh if not already written
                                 mesh_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2819,6 +3016,7 @@ def generate_dataset(
                         label_updates["paths"] = {"sphere": paths["sphere"]}
 
                     _update_sample_label(paths["labels"], label_updates)
+                    add_path_labels(paths["labels"], output_root)
 
                     ok, issues = validate_saved_sample(paths["labels"])
                     if not ok:
@@ -2948,6 +3146,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--signal-sigma-ratio", type=float, default=0.5, help="sigma_v = ratio * sigma_u when --signal-sigma-v not set. Default 0.5 for backward compatibility.")
     parser.add_argument("--signal-amplitude", type=float, default=1.0, help="Signal amplitude.")
     parser.add_argument(
+        "--signal-center",
+        type=parse_signal_center,
+        default=None,
+        metavar="X,Y,Z",
+        help=(
+            "Fix the one-centre isotropic/aniso regression pair to the nearest "
+            "template vertex to this XYZ coordinate."
+        ),
+    )
+    parser.add_argument(
         "--mnist-percentage",
         type=float,
         default=100.0,
@@ -3061,6 +3269,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         signal_amplitude=args.signal_amplitude,
         signal_num_centers=args.signal_num_centers,
         signal_centers_options=signal_centers_options,
+        signal_center=args.signal_center,
         signal_sigma_variation_percent=args.signal_sigma_variation,
         signal_amplitude_variation_percent=args.signal_amplitude_variation,
         param_method=param_method,
