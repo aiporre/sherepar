@@ -161,6 +161,10 @@ importer always skips open, disconnected, and non-genus-0 meshes before any
 dataset artifacts are written; the final summary reports how many were
 filtered.
 
+Imports resume by default: only samples with complete mesh, signal, label, and
+required sphere artifacts are skipped. Use `--no-resume` to regenerate every
+selected input and overwrite its artifacts.
+
 Generic meshes receive an all-zero `float32` signal with one value per vertex:
 
 ```bash

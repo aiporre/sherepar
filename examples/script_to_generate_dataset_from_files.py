@@ -100,6 +100,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-ratio", type=float, default=0.15, help="Validation ratio for generated splits.")
     parser.add_argument("--test-ratio", type=float, default=0.15, help="Test ratio for generated splits.")
     parser.add_argument("--split-seed", type=int, default=0, help="Random seed for ModelNet40 sampling and splits.")
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        default=True,
+        help="Regenerate every selected input, even when complete artifacts already exist.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing per-sample artifacts.")
     return parser
 
@@ -232,6 +239,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     try:
         from spherepar.benchmark.dataset_generator import (
+            _list_completed_samples,
             append_error_log,
             genus_zero_filter_reason,
             save_sample_mesh,
@@ -310,6 +318,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     total = len(mesh_inputs)
+    if args.resume:
+        completed_samples, artifact_counts = _list_completed_samples(str(output_root))
+        planned_sample_ids = {item.sample_name for item in mesh_inputs}
+        completed_for_request = planned_sample_ids & set(completed_samples)
+        print(
+            "Resume scan: "
+            f"meshes={artifact_counts['meshes']}, "
+            f"spheres={artifact_counts['spheres']}, "
+            f"signals={artifact_counts['signals']}, "
+            f"labels={artifact_counts['labels']}, "
+            f"complete={len(completed_samples)}"
+        )
+        print(
+            "Resume decision: "
+            f"matched_current_request={len(completed_for_request)}, "
+            f"regenerate={total - len(completed_for_request)}."
+        )
+    else:
+        completed_for_request = set()
+        print("Resume disabled: regenerating the full selected input plan.")
     saved = 0
     failed = 0
     skipped = 0
@@ -333,6 +361,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Dataset mode    : {mode.lower()}")
     print(f"Param method    : {args.param_method}")
     print("Filter non-g0   : enabled (required for spherical parametrization)")
+    print(f"Resume          : {args.resume}")
     print(f"Overwrite       : {args.overwrite}")
     print("=" * 68)
 
@@ -345,8 +374,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         sphere_out_path = output_dirs["spheres"] / f"{sample_name}.obj"
         spherical_label_path = output_dirs["labels"] / f"{sample_name}_spherical.json"
 
-        if label_path.exists() and not args.overwrite:
-            print(f"[{idx}/{total}] skip {sample_name} (label exists)")
+        if args.resume and not args.overwrite and sample_name in completed_for_request:
+            print(f"[{idx}/{total}] skip {sample_name} (complete artifacts found)")
             skipped += 1
             continue
 

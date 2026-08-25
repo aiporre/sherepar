@@ -39,3 +39,12 @@ def test_file_importer_discovers_flat_and_modelnet40_inputs(tmp_path: Path):
     sampled = importer._modelnet40_mesh_inputs(modelnet_root, 50.0, seed=4)
     assert len(sampled) == 2
     assert {item.class_name for item in sampled} == {"chair", "table"}
+
+
+def test_file_importer_resume_defaults_to_enabled():
+    importer = _load_importer_module()
+    parser = importer.build_arg_parser()
+    args = parser.parse_args(["--cylinders-dir", "input", "--output-root", "output"])
+    assert args.resume is True
+    args = parser.parse_args(["--cylinders-dir", "input", "--output-root", "output", "--no-resume"])
+    assert args.resume is False
