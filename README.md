@@ -250,6 +250,63 @@ MNIST-specific options:
   - If provided, it **overrides** `--mnist-percentage`.
   - Must be `<= 70000`.
 
+### How an MNIST image is projected onto a template
+
+Each generated signal is a single `float32` value for every vertex of the
+generated mesh.  The projection is performed in two resampling stages:
+
+```text
+28 x 28 MNIST image
+  -> bilinear perspective projection on a 60 x 60 Driscoll--Healy S2 grid
+  -> bilinear sampling of that grid at each mesh vertex direction
+  -> one intensity per mesh vertex
+```
+
+More precisely, `save_sample_signal()` loads the selected OpenML
+`mnist_784` image, converts its pixels to `[0, 1]`, and calls the S2CNN-derived
+`project_2d_on_sphere()` helper with bandwidth `B = 30`.  Its
+Driscoll-Healy grid has `2B x 2B = 60 x 60` samples, with
+
+- polar angle `theta_j = pi * j / (2B)`, and
+- azimuth `phi_k = pi * k / B`.
+
+The helper uses a perspective projection whose origin is just beyond the
+north pole, `(0, 0, 2.001)` in its shifted-sphere coordinates.  It bilinearly
+samples the 28 x 28 image at the resulting planar coordinates; samples outside
+the image are zero.  The helper then normalizes each spherical image to its own
+`[0, 255]` range and stores it as `uint8`.  The generator divides it by 255
+again before the mesh resampling, so the grid supplied to the mesh is in
+`[0, 1]`.  Consequently, the final signal preserves the digit's spatial
+pattern but not its original absolute grayscale scale.
+
+For a mesh vertex `v`, the generator computes a direction from the mesh center
+of mass `c`,
+
+```text
+d = (v - c) / ||v - c||
+theta = acos(d_z)
+phi = atan2(d_y, d_x) mapped to [0, 2pi)
+```
+
+It bilinearly samples the 60 x 60 grid at `(theta, phi)`.  Azimuth wraps at
+`2pi`; polar sampling is clamped at the grid limits.  Finally, the value is
+multiplied by `--signal-amplitude` and saved to
+`signals/<sample_id>_mnist.npy` in the same order as `mesh.vertices`.
+
+This mapping is radial and uses the generated mesh itself (including any
+deformation), so the same spherical digit is sampled at the deformed vertex
+directions.  It does **not** use `--param-method`, FLASH, or CEM to construct
+the MNIST signal; those optional parametrizations are written as additional
+artifacts only.  The orientation is fixed by the template coordinate axes:
+`+z` is the north-pole direction and `+x`/`+y` define azimuth.  Thus templates
+with different poses, centers of mass, or deformations can display the digit
+at different vertex locations even when the MNIST index is the same.
+
+The label's `signal` object records the source `mnist_index` and digit label,
+plus `projection_method: "s2cnn_grid_to_mesh"`, the Driscoll-Healy grid,
+bandwidth 30, and bilinear interpolation.  This is enough to identify the
+source image and reproduce the current projection convention.
+
 ### Full MNIST generation examples
 
 Full MNIST (70,000) **with deformations** (`case2_small,case3_large`):
@@ -300,6 +357,120 @@ Key points:
 - Samples use MNIST indices in dataset order, without repeats.
 - When `--param-method flash` or `--param-method cem` is used, MNIST deformation cases also write spherical parametrization outputs.
 - For `--split-tasks mnist_cls`: `train.txt` and `val.txt` use MNIST train partition (`mnist_index < 60000`), `test.txt` uses MNIST test partition (`mnist_index >= 60000`).
+
+## Anisotropic Gaussian: projection and orientation target
+
+The anisotropic signal is evaluated on the **generated (already deformed)**
+mesh.  It is not transferred from the template mesh and it does not use the
+optional FLASH/CEM spherical parametrization.  The output is one scalar value
+per generated-mesh vertex, in exactly `mesh.vertices` order.
+
+The generator first chooses one center vertex `c` on the generated mesh (the
+anisotropic signal currently has one center).  It then computes a local
+two-dimensional coordinate for **every** mesh vertex `x`, relative to that
+center.  Those coordinates are needed because the Gaussian is an ellipse: it
+must know both each vertex's distance from `c` and which in-plane direction it
+lies in, so it can apply different widths parallel and perpendicular to the
+major axis.
+
+Concretely, the implementation treats the origin as the sphere center,
+normalizes `c` and every `x` to directions on the unit sphere, and applies the
+sphere logarithm map at `c_hat = c / ||c||`:
+
+```text
+y     = x / ||x||
+theta = acos(clamp(dot(y, c_hat), -1, 1))
+z     = theta / sin(theta) * (y - dot(y, c_hat) * c_hat)
+```
+
+Here `z` is the resulting 3-D vector in the 2-D plane tangent to the unit
+sphere at `c_hat`; its norm is `theta`, the spherical (angular) distance from
+the center direction.  If `x` has exactly the same direction as `c`—in
+particular, for the selected center vertex itself—then `theta = 0`.  The code
+uses the limiting value `z = 0` rather than evaluating the undefined-looking
+ratio `theta / sin(theta)` at zero.
+
+Normalizing to the unit sphere removes radial distance from the origin before
+the local coordinates are computed.  Consequently, two vertices on the same
+ray from the origin have the same local direction; the signal depends on their
+spherical location, not how far they are from the origin.
+
+The log map and the orientation frame use the **same** tangent plane,
+`T_c_hat S2`.  The log map places every vertex in that plane as a vector `z`.
+To orient the anisotropic Gaussian signal, a stable Hughes-Möller orthonormal
+basis `(hm_e1, hm_e2)` is then constructed in that same plane.  It does not
+move the vertices into a second tangent space; it only supplies perpendicular
+directions with which to measure the already-computed vector `z`.
+
+A sampled angle `delta` (modulo `pi`) selects the physical major-axis direction
+within this basis:
+
+```text
+v = cos(delta) * hm_e1 + sin(delta) * hm_e2
+v_perp = c_hat x v
+```
+
+For each mesh vertex `x`, the scalar signal value is obtained by taking the two
+coordinates of its log-map vector `z`: one along `v` and one along
+`v_perp`.  The widths are applied to those coordinates, and the result is
+
+```text
+u_parallel = dot(z, v)
+u_perpendicular = dot(z, v_perp)
+```
+
+The signal value is then
+
+```text
+f(x) = A * exp(-1/2 * ((u_parallel / sigma_parallel)^2
+                     + (u_perpendicular / sigma_perpendicular)^2))
+```
+
+Here `A` is `amplitude`; `sigma_parallel` (also called `sigma_u` internally)
+is the width along `v`; and `sigma_perpendicular` (`sigma_v`) is the width
+along `v_perp`.  In the standard generator, `sigma_perpendicular` is supplied
+explicitly or is computed as `--signal-sigma-ratio * sigma_parallel`.  The
+widths are measured in the log-map's unit-sphere angular-distance coordinate,
+even though the current label schema records their units as
+`surface_distance` for compatibility.
+
+### How anisotropic orientation labels are computed
+
+The Hughes-Möller frame is only used to sample the physical axis; it is not
+the regression gauge.  To form a reproducible label, the generator projects a
+fixed world gauge `g = (0, 0, 1)` into the tangent plane:
+
+```text
+g1 = normalize(g - dot(g, c_hat) * c_hat)
+g2 = c_hat x g1
+phi = atan2(dot(v, g2), dot(v, g1)) mod pi
+orientation target = [cos(2 * phi), sin(2 * phi)]
+```
+
+Centers for which the projected gauge is too short (within the configured
+threshold, default `0.05`) are rejected and another center is sampled.  With
+a fixed center, the sample is skipped instead.  The doubled-angle target makes
+the label unchanged when the undirected ellipse axis is reversed (`v` and
+`-v` describe the same orientation).
+
+In `signals[]`, the `aniso_000` entry records the signal definition and
+diagnostics: `parameters.sigma_parallel`, `parameters.sigma_perpendicular`,
+`parameters.orientation_angles` (`phi`), and
+`parameters.orientation_targets_doubled_angle`.  Its `orientation_debug`
+stores the physical `major_axis`, sampling angle `delta`, fixed-gauge frame
+`gauge_e1/gauge_e2`, and Hughes--Möller frame `hm_e1/hm_e2`.
+
+The corresponding `task_groups.anisotropic_gaussian.tasks` labels are derived
+directly from that metadata:
+
+- `center_regression.label`: XYZ coordinate of the selected center vertex on
+  the deformed mesh.
+- `amplitude_regression.label`: `A` used in the formula.
+- `anisotropic_parameters_regression.label`: `sigma_parallel`,
+  `sigma_perpendicular`, `orientation` (`phi`), its doubled-angle target, and
+  the Hughes--Möller basis for diagnostics/reconstruction.
+- `orientation_regression.label`: only `[cos(2phi), sin(2phi)]`; `valid` is
+  true when this two-element target was produced.
 
 ## Labels
 
