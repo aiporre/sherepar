@@ -161,6 +161,19 @@ importer always skips open, disconnected, and non-genus-0 meshes before any
 dataset artifacts are written; the final summary reports how many were
 filtered.
 
+CEM also supports opt-in conformal post-centering with `--mobius-center`. See
+[Möbius centering after CEM](MOBIUS_CENTERING.md) for the transform convention,
+metadata schema, resume behavior, and `pmconv` integration.
+
+CEM uses the paper's experimental stereographic partition radius `1.2` by
+default; override it with `--cem-radius VALUE`. The implementation reports
+negative cotangent weights and validates the first candidate and final accepted
+sphere for collapsed or folded triangles. These conditions are warnings, so
+artifacts remain available for inspection. If an iteration increases the
+Dirichlet energy, that candidate is discarded and CEM returns the preceding
+accepted iterate. The radius and diagnostics are stored in the spherical JSON
+sidecar, and the radius is also stored in the primary label for resume matching.
+
 Imports resume by default: only samples with complete mesh, signal, label, and
 required sphere artifacts are skipped. Use `--no-resume` to regenerate every
 selected input and overwrite its artifacts.
