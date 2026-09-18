@@ -88,7 +88,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence tolerance.")
     parser.add_argument("--cem-max-iters", type=int, default=100, help="Maximum CEM iterations.")
+    parser.add_argument("--cem-radius", type=float, default=1.2, help="CEM stereographic partition radius.")
     parser.add_argument("--cem-verbose", action="store_true", help="Verbose CEM output.")
+    parser.add_argument(
+        "--mobius-center",
+        action="store_true",
+        help="Apply area-weighted Möbius centering after CEM (requires --param-method cem).",
+    )
     parser.add_argument(
         "--percentage",
         type=float,
@@ -237,11 +243,18 @@ def _build_signal(
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    if args.mobius_center and args.param_method != "cem":
+        print("ERROR: --mobius-center requires --param-method cem.")
+        return 1
+    if not np.isfinite(args.cem_radius) or args.cem_radius <= 0.0:
+        print("ERROR: --cem-radius must be finite and positive.")
+        return 1
     try:
         from spherepar.benchmark.dataset_generator import (
             _list_completed_samples,
             append_error_log,
             genus_zero_filter_reason,
+            parametrization_request_matches,
             save_sample_mesh,
             save_spherical_parametrization,
         )
@@ -321,7 +334,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.resume:
         completed_samples, artifact_counts = _list_completed_samples(str(output_root))
         planned_sample_ids = {item.sample_name for item in mesh_inputs}
-        completed_for_request = planned_sample_ids & set(completed_samples)
+        completed_for_request = {
+            sample_id for sample_id in planned_sample_ids & set(completed_samples)
+            if parametrization_request_matches(
+                completed_samples[sample_id],
+                args.param_method,
+                bool(args.mobius_center),
+                float(args.cem_radius),
+            )
+        }
         print(
             "Resume scan: "
             f"meshes={artifact_counts['meshes']}, "
@@ -360,6 +381,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Found meshes    : {total}")
     print(f"Dataset mode    : {mode.lower()}")
     print(f"Param method    : {args.param_method}")
+    print(f"CEM radius      : {args.cem_radius}")
+    print(f"Möbius center  : {args.mobius_center}")
     print("Filter non-g0   : enabled (required for spherical parametrization)")
     print(f"Resume          : {args.resume}")
     print(f"Overwrite       : {args.overwrite}")
@@ -403,6 +426,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     cem_eps=float(args.cem_eps),
                     cem_max_iters=int(args.cem_max_iters),
                     cem_verbose=bool(args.cem_verbose),
+                    cem_radius=float(args.cem_radius),
+                    mobius_center=bool(args.mobius_center),
+                    log_path=str(log_path),
+                    template_id=sample_name,
+                    deformation_case="case1_no",
                 )
                 sphere_rel = sphere_paths.get("sphere")
                 spherical_label_rel = sphere_paths.get("spherical_label")
@@ -442,6 +470,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "dataname": mesh_input.dataname,
                     "created_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "source_mesh": _resolve_relative(mesh_src_path, mesh_input.source_root),
+                    "mobius_center": bool(args.mobius_center),
+                    "cem_radius": float(args.cem_radius) if args.param_method == "cem" else None,
                 },
                 "paths": {
                     "mesh": mesh_rel,
@@ -495,6 +525,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "deformation": {"type": "none"},
                 "parametrization": {
                     "method": args.param_method,
+                    "cem_radius": float(args.cem_radius) if args.param_method == "cem" else None,
+                    "mobius_center": bool(args.mobius_center),
                     "success": bool(param_success),
                     "error": param_error,
                 },

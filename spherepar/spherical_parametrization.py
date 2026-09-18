@@ -1,7 +1,7 @@
 """Compatibility wrapper for spherical parametrization utilities."""
 from __future__ import annotations
 
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, Callable, List, Optional
 
 import numpy as np
 import trimesh
@@ -12,6 +12,14 @@ from spherepar.flash_parametrization import (  # noqa: F401
     load_mesh_with_trimesh,
 )
 from spherepar.mesh import MeshFactory
+from spherepar.mobius_centering import center_spherical_mesh
+from spherepar.parametrization_validation import (
+    SPHERE_MIN_AREA_RELATIVE_TO_MEDIAN,
+    SPHERE_MIN_VERTEX_SEPARATION,
+    SPHERE_ORIENTATION_TOLERANCE,
+    SPHERE_UNIT_NORM_TOLERANCE,
+    validate_sphere_parameterization,
+)
 
 
 def _compute_face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -195,7 +203,6 @@ def verify_normal_orientation_preserved(
     return is_valid, report
 
 
-
 def compute_spherical_parametrization(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -203,7 +210,10 @@ def compute_spherical_parametrization(
     cem_eps: float = 1e-6,
     cem_max_iters: int = 100,
     cem_verbose: bool = False,
+    cem_radius: float = 1.2,
     verify: bool = True,
+    mobius_center: bool = False,
+    cem_input_diagnostics_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Compute spherical parametrization of a mesh.
     
@@ -221,8 +231,14 @@ def compute_spherical_parametrization(
         CEM maximum iterations.
     cem_verbose : bool
         CEM verbose output.
+    cem_radius : float
+        CEM stereographic partition radius.
     verify : bool
         If True, validate topology and normal orientation after parametrization.
+    mobius_center : bool
+        If True, apply area-weighted Möbius centering after CEM.
+    cem_input_diagnostics_callback : callable, optional
+        Receives CEM input-quality diagnostics immediately before Algorithm 4.1.
     
     Returns
     -------
@@ -234,22 +250,48 @@ def compute_spherical_parametrization(
     vertices = np.asarray(vertices, dtype=np.float64)
     faces = np.asarray(faces, dtype=np.int32)
 
+    if mobius_center and method != "cem":
+        raise ValueError("mobius_center is supported only with method='cem'")
+
     if method == "flash":
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         sphere_vertices = flash_map(mesh)
         meta: Dict[str, Any] = {"method": "flash"}
     elif method == "cem":
         mesh_surf = MeshFactory.make_mesh("surf", vertices, faces)
-        stretch = stretch_parametrization(mesh_surf, eps=cem_eps, max_iters=cem_max_iters, verbose=cem_verbose)
+        stretch = stretch_parametrization(
+            mesh_surf,
+            eps=cem_eps,
+            max_iters=cem_max_iters,
+            verbose=cem_verbose,
+            radius=cem_radius,
+            input_diagnostics_callback=cem_input_diagnostics_callback,
+        )
         sphere_vertices = stretch.convert_mesh().get_vertices_collection()
         meta = {
             "method": "cem",
             "eps": float(cem_eps),
             "max_iters": int(cem_max_iters),
             "verbose": bool(cem_verbose),
+            "cem_radius": float(cem_radius),
+            "cem_diagnostics": stretch.cem_diagnostics,
+            "mobius_center": bool(mobius_center),
         }
+        if mobius_center:
+            sphere_vertices, centering_meta = center_spherical_mesh(
+                vertices_orig, faces_orig, sphere_vertices
+            )
+            meta["mobius_centering"] = centering_meta
+            print(
+                "Möbius centering: "
+                f"centroid {centering_meta['before']['centroid_norm']:.3e} -> "
+                f"{centering_meta['after']['centroid_norm']:.3e} "
+                f"({centering_meta['iterations']} iteration(s))"
+            )
     else:
         raise ValueError("method must be one of: 'flash', 'cem'")
+
+    meta["mobius_center"] = bool(mobius_center)
 
     norms = np.linalg.norm(sphere_vertices, axis=1)
     meta.update(
@@ -276,6 +318,8 @@ def compute_spherical_parametrization(
         )
         meta["orientation_valid"] = orientation_valid
         meta["orientation_report"] = orientation_report
+        meta["sphere_validation"] = validate_sphere_parameterization(
+            vertices_orig, faces_orig, sphere_vertices, faces
+        )
     
     return sphere_vertices, meta
-

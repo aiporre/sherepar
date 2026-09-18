@@ -44,9 +44,8 @@ Implements Algorithm 4.1 (initial spherical conformal map) and Algorithm 4.2
 #                   | balanced pole coverage       |   Fix: centering + FLASH-style
 #                   | (FLASH north/south rescale)  |         rescaling added
 # ------------------|------------------------------|----------------------------
-# 4.2 Step 3b       | r = 1  (unit-circle boundary | r = median(|h|)  (drifts
-#                   | of Möbius inversion)         |   arbitrarily away from 1)
-#                   |                              |   Fix: r = 1.0
+# 4.2 Step 3b       | r is an algorithm input      | r was hardcoded to 1.0
+#                   | (paper experiments: 1.2)     |   Fix: expose radius, default 1.2
 # ------------------|------------------------------|----------------------------
 # 4.2 Step 3c       | [L_D]_{I,I} h_I = ...       | Used Ls (stretch Laplacian)
 #                   |                              |   Fix: use Ld (cotangent)
@@ -54,9 +53,8 @@ Implements Algorithm 4.1 (initial spherical conformal map) and Algorithm 4.2
 # 4.2 Step 3e       | delta = E_D(g) - E_D(f)     | Not computed at all
 #                   |                              |   Fix: added _dirichlet_energy
 # ------------------|------------------------------|----------------------------
-# 4.2 Step 3f       | stop only when 0<=delta<=eps | stop when delta <= eps
-#                   | (small positive improvement) |   (also stops on divergence)
-#                   |                              |   Fix: 0 <= delta <= eps
+# 4.2 Step 3f       | continue while delta > eps   | accepted energy-increasing steps
+#                   |                              |   Fix: rollback when delta < 0
 # ------------------|------------------------------|----------------------------
 # 4.2 Step 3a       | h_i <- h_i / |h_i|^2        | No guard for |h_i|=0
 #                   |                              |   Fix: clamp |h|^2 >= _EPS_INV
@@ -66,11 +64,13 @@ Implements Algorithm 4.1 (initial spherical conformal map) and Algorithm 4.2
 # =============================================================================
 """
 
-from typing import Any
+from typing import Any, Callable, Optional
+import warnings
 
 import numpy as np
 
 from spherepar.mesh import MeshSurf, StretchFunction, Vector, Vertex
+from spherepar.parametrization_validation import validate_sphere_parameterization
 
 # ---------------------------------------------------------------------------
 # Numerical safeguards
@@ -145,6 +145,177 @@ def _dirichlet_energy(Ld: np.ndarray, h: np.ndarray) -> float:
     g   = _inverse_stereo_projection(h)   # (N, 3)
     Ldg = Ld @ g                          # (N, 3)
     return float(np.einsum('ij,ij->', g, Ldg))
+
+
+def _cotangent_weight_diagnostics(
+    mesh: MeshSurf,
+    laplacian: np.ndarray,
+    tolerance: float = 1e-12,
+) -> dict[str, Any]:
+    """Report the intrinsic-Delaunay cotangent condition on mesh edges."""
+    edge_ids = np.asarray(mesh.get_edges_collection(), dtype=np.int64)
+    weights = np.asarray([
+        -0.5 * (laplacian[i, j] + laplacian[j, i])
+        for i, j in edge_ids
+    ], dtype=np.float64)
+    negative = weights < -tolerance
+    negative_edge_ids = edge_ids[negative]
+    negative_edge_set = {tuple(edge) for edge in negative_edge_ids.tolist()}
+    affected_face_ids = []
+    for face_id, (a, b, c) in enumerate(mesh.get_faces_collection()):
+        face_edges = (
+            tuple(sorted((int(a), int(b)))),
+            tuple(sorted((int(b), int(c)))),
+            tuple(sorted((int(c), int(a)))),
+        )
+        if any(edge in negative_edge_set for edge in face_edges):
+            affected_face_ids.append(face_id)
+    return {
+        "tolerance": float(tolerance),
+        "edge_count": int(len(edge_ids)),
+        "weight_min": float(weights.min()),
+        "weight_max": float(weights.max()),
+        "negative_weight_count": int(np.count_nonzero(negative)),
+        "negative_edge_ids": negative_edge_ids.tolist(),
+        "affected_triangle_count": int(len(affected_face_ids)),
+        "affected_triangle_ids": affected_face_ids,
+        "is_intrinsic_delaunay": not bool(np.any(negative)),
+    }
+
+
+def _face_angle_diagnostics(
+    mesh: MeshSurf,
+    target_face_count: int = 0,
+) -> dict[str, Any]:
+    """Measure minimum angles and identify low-quality input triangles."""
+    vertices = np.asarray(mesh.get_vertices_collection(), dtype=np.float64)
+    faces = np.asarray(mesh.get_faces_collection(), dtype=np.int64)
+    triangles = vertices[faces]
+
+    def corner_angle(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        denominator = np.linalg.norm(first, axis=1) * np.linalg.norm(second, axis=1)
+        if np.any(denominator <= np.finfo(np.float64).eps):
+            raise ValueError("input mesh contains a zero-length triangle edge")
+        cosine = np.einsum("ij,ij->i", first, second) / denominator
+        return np.arccos(np.clip(cosine, -1.0, 1.0))
+
+    angles = np.column_stack((
+        corner_angle(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        corner_angle(triangles[:, 2] - triangles[:, 1], triangles[:, 0] - triangles[:, 1]),
+        corner_angle(triangles[:, 0] - triangles[:, 2], triangles[:, 1] - triangles[:, 2]),
+    ))
+    angles_deg = np.rad2deg(angles)
+    minimum_angles_deg = angles_deg.min(axis=1)
+    maximum_angles_deg = angles_deg.max(axis=1)
+    target_percentage = 100.0 * target_face_count / len(faces) if len(faces) else 0.0
+    threshold_comparison = []
+    for threshold in range(5, 61, 5):
+        count = int(np.count_nonzero(minimum_angles_deg < threshold))
+        percentage = 100.0 * count / len(faces) if len(faces) else 0.0
+        threshold_comparison.append({
+            "threshold_degrees": threshold,
+            "face_count": count,
+            "percentage": float(percentage),
+            "difference_from_affected_percentage": float(percentage - target_percentage),
+        })
+        if percentage >= target_percentage:
+            break
+    closest_threshold = min(
+        threshold_comparison,
+        key=lambda item: abs(item["difference_from_affected_percentage"]),
+    )
+    threshold_counts = {
+        str(item["threshold_degrees"]): item["face_count"]
+        for item in threshold_comparison
+    }
+    below_five_ids = np.flatnonzero(minimum_angles_deg < 5.0)
+    worst_face_ids = np.argsort(minimum_angles_deg)[:min(10, len(faces))]
+    return {
+        "face_count": int(len(faces)),
+        "minimum_angle_degrees": float(minimum_angles_deg.min()),
+        "median_minimum_angle_degrees": float(np.median(minimum_angles_deg)),
+        "faces_below_angle_degrees": threshold_counts,
+        "angle_threshold_comparison": threshold_comparison,
+        "negative_weight_affected_triangle_count": int(target_face_count),
+        "negative_weight_affected_triangle_percentage": float(target_percentage),
+        "closest_threshold_degrees": int(closest_threshold["threshold_degrees"]),
+        "closest_threshold_face_count": int(closest_threshold["face_count"]),
+        "closest_threshold_percentage": float(closest_threshold["percentage"]),
+        "below_5_degree_face_count": int(len(below_five_ids)),
+        "below_5_degree_face_ids": below_five_ids.tolist(),
+        "obtuse_face_count": int(np.count_nonzero(maximum_angles_deg > 90.0)),
+        "worst_faces": [
+            {
+                "face_id": int(face_id),
+                "minimum_angle_degrees": float(minimum_angles_deg[face_id]),
+                "angles_degrees": angles_deg[face_id].tolist(),
+            }
+            for face_id in worst_face_ids
+        ],
+    }
+
+
+def _format_cem_input_summary(
+    angle_diagnostics: dict[str, Any],
+    cotangent_diagnostics: dict[str, Any],
+) -> str:
+    """Return the compact preflight line used by stdout and dataset logs."""
+    return (
+        f"faces={angle_diagnostics['face_count']}, "
+        f"min_angle={angle_diagnostics['minimum_angle_degrees']:.6f}deg, "
+        f"median_min_angle={angle_diagnostics['median_minimum_angle_degrees']:.6f}deg, "
+        f"below_5deg={angle_diagnostics['below_5_degree_face_count']}, "
+        f"obtuse_faces={angle_diagnostics['obtuse_face_count']}, "
+        f"negative_cotangent_edges={cotangent_diagnostics['negative_weight_count']}, "
+        f"affected_triangles={cotangent_diagnostics['affected_triangle_count']}"
+    )
+
+
+def _print_cem_input_diagnostics(
+    angle_diagnostics: dict[str, Any],
+    cotangent_diagnostics: dict[str, Any],
+) -> None:
+    """Print the input summary and cumulative 5-degree angle comparison."""
+    print(
+        "[CEM input] "
+        + _format_cem_input_summary(angle_diagnostics, cotangent_diagnostics),
+        flush=True,
+    )
+    target_percentage = angle_diagnostics["negative_weight_affected_triangle_percentage"]
+    for row in angle_diagnostics["angle_threshold_comparison"]:
+        print(
+            f"[CEM input] faces below {row['threshold_degrees']:2d}deg: "
+            f"{row['face_count']:5d} / {angle_diagnostics['face_count']} "
+            f"({row['percentage']:.2f}%); "
+            f"negative-weight affected target={target_percentage:.2f}%",
+            flush=True,
+        )
+    print(
+        "[CEM input] closest cumulative angle threshold: "
+        f"below {angle_diagnostics['closest_threshold_degrees']}deg -> "
+        f"{angle_diagnostics['closest_threshold_face_count']} faces "
+        f"({angle_diagnostics['closest_threshold_percentage']:.2f}%)",
+        flush=True,
+    )
+
+
+def _cem_input_log_message(
+    angle_diagnostics: dict[str, Any],
+    cotangent_diagnostics: dict[str, Any],
+) -> str:
+    """Return a one-line form of the complete input preflight table."""
+    threshold_text = ", ".join(
+        f"below_{row['threshold_degrees']}deg={row['face_count']}({row['percentage']:.2f}%)"
+        for row in angle_diagnostics["angle_threshold_comparison"]
+    )
+    return (
+        _format_cem_input_summary(angle_diagnostics, cotangent_diagnostics)
+        + f"; angle_thresholds=[{threshold_text}]"
+        + "; closest_threshold="
+        + f"{angle_diagnostics['closest_threshold_degrees']}deg:"
+        + f"{angle_diagnostics['closest_threshold_face_count']}"
+        + f"({angle_diagnostics['closest_threshold_percentage']:.2f}%)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +521,12 @@ def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
 def stretch_parametrization(mesh: MeshSurf,
                             eps: float = 1e-6,
                             max_iters: int = 1000,
-                            verbose: bool = True) -> StretchFunction:
+                            verbose: bool = True,
+                            radius: float = 1.2,
+                            input_diagnostics_callback: Optional[
+                                Callable[[dict[str, Any]], None]
+                            ] = None,
+                            ) -> StretchFunction:
     """Algorithm 4.2: CEM iteration to minimise the Dirichlet energy on S^2.
 
     Starts from the Algorithm 4.1 result and iterates until the improvement
@@ -362,22 +538,64 @@ def stretch_parametrization(mesh: MeshSurf,
     eps       : convergence threshold  delta = E_D(g) - E_D(f) <= eps
     max_iters : maximum number of CEM iterations
     verbose   : print per-iteration diagnostics
+    radius    : stereographic partition radius from Algorithm 4.2
+    input_diagnostics_callback : optional callback invoked before Algorithm 4.1
 
     Returns
     -------
     StretchFunction  - the improved conformal map (h stored in C)
     """
+    if not np.isfinite(radius) or radius <= 0.0:
+        raise ValueError("radius must be finite and positive")
+    if not np.isfinite(eps) or eps < 0.0:
+        raise ValueError("eps must be finite and non-negative")
+    if max_iters < 1:
+        raise ValueError("max_iters must be at least 1")
+
+    # ----- Input-mesh preflight, before Algorithm 4.1 ------------------------
+    mesh_vertices = mesh.get_vertices_collection()
+    mesh_faces = mesh.get_faces_collection()
+
+    # Cotangent Laplacian L_D is fixed throughout Algorithm 4.2.
+    # BUG 4 (fixed): old code recomputed Ls (stretch Laplacian) every iteration.
+    # Algorithm 4.2 uses L_D (cotangent Laplacian) in all iterations.
+    Ld = mesh.get_laplacian_matrix(weight='cotangent').toarray()
+    cotangent_diagnostics = _cotangent_weight_diagnostics(mesh, Ld)
+    angle_diagnostics = _face_angle_diagnostics(
+        mesh,
+        target_face_count=cotangent_diagnostics["affected_triangle_count"],
+    )
+    _print_cem_input_diagnostics(angle_diagnostics, cotangent_diagnostics)
+    if input_diagnostics_callback is not None:
+        input_diagnostics_callback({
+            "summary": _cem_input_log_message(angle_diagnostics, cotangent_diagnostics),
+            "input_mesh_quality": angle_diagnostics,
+            "cotangent_weights": cotangent_diagnostics,
+        })
+    if not cotangent_diagnostics["is_intrinsic_delaunay"]:
+        warnings.warn(
+            "CEM input has "
+            f"{cotangent_diagnostics['negative_weight_count']} negative cotangent "
+            "edge weight(s), affecting "
+            f"{cotangent_diagnostics['affected_triangle_count']} triangle(s); "
+            "the intrinsic-Delaunay convex-combination guarantee does not apply.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     # ----- Run Algorithm 4.1 -------------------------------------------------
     dirichlet_stretch = dirichlet_parametrization(mesh)
     h = dirichlet_stretch.h.copy()   # complex map (stereo projection of sphere)
 
-    # ----- Cotangent Laplacian L_D (fixed throughout Algorithm 4.2) ----------
-    # BUG 4 (fixed): old code recomputed Ls (stretch Laplacian) every iteration.
-    # Algorithm 4.2 uses L_D (cotangent Laplacian) in all iterations.
-    Ld = mesh.get_laplacian_matrix(weight='cotangent').toarray()
-
     N   = len(h)
     E_g = _dirichlet_energy(Ld, h)
+    initial_energy = E_g
+    first_iteration_validation = None
+    first_iteration_partition = None
+    attempted_iterations = 0
+    accepted_iterations = 0
+    last_delta = None
+    stop_reason = "max_iters"
 
     if verbose:
         print(f"[A4.2] iter 0 (init from Algo 4.1): E_D = {E_g:.6e}")
@@ -387,26 +605,29 @@ def stretch_parametrization(mesh: MeshSurf,
 
     # ----- Step 3: iterate ---------------------------------------------------
     for count in range(1, max_iters + 1):
+        attempted_iterations = count
+        h_previous = h.copy()
+        E_previous = E_g
 
         # Step 3a: h_i <- h_i / |h_i|^2  (Mobius inversion)
         # BUG 6 (fixed): no guard for |h_i|=0 -> division by zero.
-        abs_h_sq = np.abs(h) ** 2
+        abs_h_sq = np.abs(h_previous) ** 2
         abs_h_sq = np.where(abs_h_sq < _EPS_INV, _EPS_INV, abs_h_sq)  # guard
-        h = h / abs_h_sq
+        h_candidate = h_previous / abs_h_sq
 
-        # Step 3b: I = {i : |h_i| < 1},  B = complement
-        # The Möbius inversion h -> h/|h|^2 maps the open unit disk to its
-        # exterior and vice versa.  Therefore the natural partition boundary is
-        # the unit circle (r = 1), not the empirical median, which drifts
-        # arbitrarily and produces an inconsistent Dirichlet sub-problem.
-        abs_h = np.abs(h)
-        r     = 1.0
-        I     = np.where(abs_h <  r)[0].tolist()
-        B     = np.where(abs_h >= r)[0].tolist()
+        # Step 3b: I = {i : |h_i| < radius}, B = complement.
+        abs_h = np.abs(h_candidate)
+        I = np.where(abs_h < radius)[0].tolist()
+        B = np.where(abs_h >= radius)[0].tolist()
+        if count == 1:
+            first_iteration_partition = {
+                "interior_count": int(len(I)),
+                "boundary_count": int(len(B)),
+            }
 
         if verbose:
             print(f"[A4.2] iter {count}: |I|={len(I)}, |B|={len(B)}, "
-                  f"r=1.0, |h| in [{abs_h.min():.4e}, {abs_h.max():.4e}]")
+                  f"r={radius:g}, |h| in [{abs_h.min():.4e}, {abs_h.max():.4e}]")
 
         # [A4.2-1] partition sanity
         assert len(I) + len(B) == N, (
@@ -414,13 +635,14 @@ def stretch_parametrization(mesh: MeshSurf,
         )
 
         if len(B) == 0:
+            stop_reason = "empty_boundary_rollback"
             if verbose:
-                print("[A4.2] B is empty - all vertices interior. Stopping.")
+                print("[A4.2] B is empty - retaining the previous iterate.")
             break
 
         # Step 3c: [L_D]_{I,I} h_I = -[L_D]_{I,B} h_B
         A_coeff = Ld[np.ix_(I, I)]
-        h_b     = h[B]
+        h_b     = h_candidate[B]
         b_coeff = -Ld[np.ix_(I, B)] @ h_b
         h_I     = np.linalg.solve(A_coeff, b_coeff)
 
@@ -429,10 +651,10 @@ def stretch_parametrization(mesh: MeshSurf,
             f"NaN/Inf in h_I at iteration {count}"
         )
 
-        h[I] = h_I
+        h_candidate[I] = h_I
 
         # Step 3d: map back to sphere via Pi^{-1} (done by _inverse_stereo_projection)
-        sphere_pts   = _inverse_stereo_projection(h)
+        sphere_pts   = _inverse_stereo_projection(h_candidate)
         sphere_norms = np.linalg.norm(sphere_pts, axis=1)
 
         # [A4.2-3] sphere norms
@@ -441,24 +663,75 @@ def stretch_parametrization(mesh: MeshSurf,
             f"min={sphere_norms.min():.6f}, max={sphere_norms.max():.6f}"
         )
 
+        if count == 1:
+            first_iteration_validation = validate_sphere_parameterization(
+                mesh_vertices, mesh_faces, sphere_pts, mesh_faces
+            )
+            if not first_iteration_validation["is_valid"]:
+                warnings.warn(
+                    "CEM first iteration produced invalid spherical geometry: "
+                    + "; ".join(first_iteration_validation["errors"]),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         # Step 3e: delta = E_D(g) - E_D(f)
-        E_f   = _dirichlet_energy(Ld, h)
-        delta = E_g - E_f
+        E_f = _dirichlet_energy(Ld, h_candidate)
+        delta = E_previous - E_f
+        last_delta = float(delta)
 
         if verbose:
             print(f"[A4.2] iter {count}: "
-                  f"E_D(g)={E_g:.6e}, E_D(f)={E_f:.6e}, delta={delta:.6e}")
+                  f"E_D(g)={E_previous:.6e}, E_D(f)={E_f:.6e}, delta={delta:.6e}")
 
-        # Step 3f: g <- f; stop only on small *positive* improvement
-        # Stopping when delta < 0 (energy increased) would exit on divergence.
-        # We only converge when the improvement 0 <= delta <= eps.
+        # Reject an energy-increasing candidate instead of returning a worse map.
+        if delta < 0.0:
+            stop_reason = "energy_increase_rollback"
+            if verbose:
+                print(f"[A4.2] Energy increased at iteration {count}; "
+                      "retaining the previous iterate.")
+            break
+
+        h = h_candidate
         E_g = E_f
+        accepted_iterations += 1
 
-        if 0 <= delta <= eps:
+        if delta <= eps:
+            stop_reason = "converged"
             if verbose:
                 print(f"[A4.2] Converged at iteration {count}: "
                       f"delta={delta:.3e} <= eps={eps:.3e}")
             break
 
+    final_sphere_pts = _inverse_stereo_projection(h)
+    final_validation = validate_sphere_parameterization(
+        mesh_vertices, mesh_faces, final_sphere_pts, mesh_faces
+    )
+    if not final_validation["is_valid"]:
+        warnings.warn(
+            "CEM final iterate has invalid spherical geometry: "
+            + "; ".join(final_validation["errors"]),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     dirichlet_stretch.h = h
+    dirichlet_stretch.cem_diagnostics = {
+        "radius": float(radius),
+        "input_mesh_quality": angle_diagnostics,
+        "cotangent_weights": cotangent_diagnostics,
+        "first_iteration_partition": first_iteration_partition,
+        "first_iteration_validation": first_iteration_validation,
+        "final_validation": final_validation,
+        "convergence": {
+            "attempted_iterations": int(attempted_iterations),
+            "accepted_iterations": int(accepted_iterations),
+            "stop_reason": stop_reason,
+            "initial_energy": float(initial_energy),
+            "final_energy": float(E_g),
+            "last_delta": last_delta,
+            "eps": float(eps),
+            "max_iters": int(max_iters),
+        },
+    }
     return dirichlet_stretch

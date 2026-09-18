@@ -9,6 +9,7 @@ from spherepar.benchmark.dataset_generator import (
     add_path_labels,
     build_arg_parser,
     generate_dataset,
+    parametrization_request_matches,
     _list_completed_samples,
     _next_sample_index,
 )
@@ -94,6 +95,35 @@ def test_workers_cli_flag_defaults_to_one_and_accepts_parallelism():
     parser = build_arg_parser()
     assert parser.parse_args(["input"]).workers == 1
     assert parser.parse_args(["input", "--workers", "2"]).workers == 2
+
+
+def test_mobius_center_cli_flag_is_opt_in():
+    parser = build_arg_parser()
+    assert parser.parse_args(["input"]).mobius_center is False
+    args = parser.parse_args(["input", "--param-method", "cem", "--mobius-center"])
+    assert args.mobius_center is True
+
+
+def test_cem_radius_cli_defaults_to_paper_value_and_accepts_override():
+    parser = build_arg_parser()
+    assert parser.parse_args(["input"]).cem_radius == 1.2
+    assert parser.parse_args(["input", "--cem-radius", "1.7"]).cem_radius == 1.7
+
+
+def test_resume_cem_radius_treats_missing_value_as_legacy_one():
+    legacy = {"parametrization": {"method": "cem", "mobius_center": False}}
+    current = {
+        "parametrization": {
+            "method": "cem",
+            "mobius_center": False,
+            "cem_radius": 1.2,
+        }
+    }
+
+    assert parametrization_request_matches(legacy, "cem", False, 1.0)
+    assert not parametrization_request_matches(legacy, "cem", False, 1.2)
+    assert parametrization_request_matches(current, "cem", False, 1.2)
+    assert not parametrization_request_matches(current, "cem", False, 1.0)
 
 
 def test_workers_must_be_positive():
