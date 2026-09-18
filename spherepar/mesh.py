@@ -602,6 +602,8 @@ class StretchFunction:
         # TODO: change implementation to use a dictionary (id, harmonic_point or complex number)
         self.mesh = mesh
         self.h = harmonic_map
+        # Populated by CEM without changing the long-standing return type.
+        self.cem_diagnostics = None
 
     @property
     def h(self):
