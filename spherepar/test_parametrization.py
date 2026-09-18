@@ -1,4 +1,5 @@
 from unittest import TestCase
+from unittest.mock import patch
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,7 +8,7 @@ from skimage.draw import ellipsoid
 from spherepar.mesh import *
 from spherepar.cem_parametrization import (dirichlet_parametrization, stretch_parametrization,
                                            _dirichlet_energy, _inverse_stereo_projection,
-                                           _EPS_INV)
+                                           _cotangent_weight_diagnostics, _EPS_INV)
 
 
 class Test(TestCase):
@@ -266,6 +267,73 @@ class TestEllipsoidSphericalConformal(TestCase):
             E_final, E_init + abs(E_init) * 0.05,
             f"Energy increased significantly: {E_init:.6e} -> {E_final:.6e}"
         )
+
+    def test_algo42_rolls_back_energy_increase(self):
+        mesh = self._make_ellipsoid_mesh()
+        initial = dirichlet_parametrization(mesh).h.copy()
+
+        with patch(
+            "spherepar.cem_parametrization._dirichlet_energy",
+            side_effect=[1.0, 2.0],
+        ):
+            result = stretch_parametrization(
+                mesh, max_iters=3, verbose=False, radius=1.2
+            )
+
+        np.testing.assert_allclose(result.h, initial, atol=0.0, rtol=0.0)
+        convergence = result.cem_diagnostics["convergence"]
+        self.assertEqual(convergence["stop_reason"], "energy_increase_rollback")
+        self.assertEqual(convergence["attempted_iterations"], 1)
+        self.assertEqual(convergence["accepted_iterations"], 0)
+        self.assertEqual(convergence["final_energy"], 1.0)
+
+    def test_algo42_radius_and_stage_diagnostics(self):
+        mesh = self._make_ellipsoid_mesh()
+        result = stretch_parametrization(
+            mesh, eps=1e-4, max_iters=2, verbose=False, radius=1.7
+        )
+
+        diagnostics = result.cem_diagnostics
+        self.assertEqual(diagnostics["radius"], 1.7)
+        angle_quality = diagnostics["input_mesh_quality"]
+        thresholds = [
+            row["threshold_degrees"]
+            for row in angle_quality["angle_threshold_comparison"]
+        ]
+        self.assertEqual(thresholds, list(range(5, thresholds[-1] + 1, 5)))
+        self.assertIn("closest_threshold_degrees", angle_quality)
+        self.assertIsNotNone(diagnostics["first_iteration_partition"])
+        self.assertIsNotNone(diagnostics["first_iteration_validation"])
+        self.assertIn("is_valid", diagnostics["final_validation"])
+
+    def test_algo42_rejects_invalid_radius(self):
+        mesh = self._make_ellipsoid_mesh()
+        for radius in (0.0, -1.0, np.nan, np.inf):
+            with self.assertRaisesRegex(ValueError, "radius must be finite and positive"):
+                stretch_parametrization(mesh, verbose=False, radius=radius)
+
+    def test_cotangent_diagnostics_reports_negative_edge(self):
+        class EdgeFixture:
+            @staticmethod
+            def get_edges_collection():
+                return np.array([[0, 1], [1, 2]], dtype=np.int64)
+
+            @staticmethod
+            def get_faces_collection():
+                return np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+
+        laplacian = np.array([
+            [2.0, -2.0, 0.0],
+            [-2.0, 1.0, 1.0],
+            [0.0, 1.0, -1.0],
+        ])
+        report = _cotangent_weight_diagnostics(EdgeFixture(), laplacian)
+
+        self.assertFalse(report["is_intrinsic_delaunay"])
+        self.assertEqual(report["negative_weight_count"], 1)
+        self.assertEqual(report["negative_edge_ids"], [[1, 2]])
+        self.assertEqual(report["affected_triangle_count"], 1)
+        self.assertEqual(report["affected_triangle_ids"], [0])
 
     def test_distortion_diagnostics(self):
         """Run full pipeline and print distortion diagnostics (informational)."""

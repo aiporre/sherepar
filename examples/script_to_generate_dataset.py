@@ -105,7 +105,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  Signal centers opt : {args.signal_centers_options}")
     print(f"  CEM eps            : {args.cem_eps}")
     print(f"  CEM max iters      : {args.cem_max_iters}")
+    print(f"  CEM radius         : {args.cem_radius}")
     print(f"  CEM verbose        : {args.cem_verbose}")
+    print(f"  Möbius center      : {args.mobius_center}")
     print(f"  Deformation cases  : {args.deformation_cases}")
     print(f"  Create splits      : {args.create_splits}")
     print(f"  Split tasks        : {args.split_tasks}")
@@ -163,6 +165,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         cem_eps=args.cem_eps,
         cem_max_iters=args.cem_max_iters,
         cem_verbose=args.cem_verbose,
+        cem_radius=args.cem_radius,
+        mobius_center=args.mobius_center,
         deformation_cases=deformation_cases,
         create_splits=args.create_splits,
         split_tasks=split_tasks,

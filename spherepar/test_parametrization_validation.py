@@ -6,6 +6,7 @@ from spherepar.spherical_parametrization import (
     verify_topology_preserved,
     verify_normal_orientation_preserved,
     _compute_face_normals,
+    validate_sphere_parameterization,
 )
 
 
@@ -39,6 +40,40 @@ class TestComputeFaceNormals:
 
         normals = _compute_face_normals(vertices, faces)
         assert normals.shape == (2, 3)
+
+
+class TestSphereParameterizationValidation:
+    def test_valid_icosphere_passes(self):
+        import trimesh
+
+        mesh = trimesh.creation.icosphere(subdivisions=1)
+        report = validate_sphere_parameterization(
+            mesh.vertices, mesh.faces, mesh.vertices, mesh.faces
+        )
+
+        assert report["is_valid"] is True
+        assert report["errors"] == []
+        assert report["degenerate_face_count"] == 0
+        assert report["orientation"] == "outward"
+
+    def test_collects_near_collapse_and_fold_measurements(self):
+        import trimesh
+
+        mesh = trimesh.creation.icosphere(subdivisions=1)
+        sphere_vertices = np.asarray(mesh.vertices).copy()
+        first_face = mesh.faces[0]
+        sphere_vertices[first_face[1]] = sphere_vertices[first_face[0]]
+
+        report = validate_sphere_parameterization(
+            mesh.vertices, mesh.faces, sphere_vertices, mesh.faces
+        )
+
+        assert report["is_valid"] is False
+        assert report["min_vertex_separation"] == 0.0
+        assert report["near_duplicate_vertex_count"] >= 2
+        assert report["degenerate_face_count"] > 0
+        assert report["near_zero_orientation_face_count"] > 0
+        assert len(report["errors"]) >= 3
 
 
 class TestVerifyTopologyPreserved:

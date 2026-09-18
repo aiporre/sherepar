@@ -802,6 +802,30 @@ def _label_generation_value(label: Dict[str, Any], key: str) -> Optional[str]:
     return str(value) if value is not None else None
 
 
+def parametrization_request_matches(
+    label: Dict[str, Any],
+    method: Optional[str],
+    mobius_center: bool,
+    cem_radius: float,
+) -> bool:
+    """Return whether a completed label matches the requested sphere settings."""
+    parametrization = label.get("parametrization", {})
+    if not isinstance(parametrization, dict):
+        return False
+    if parametrization.get("method") != method:
+        return False
+    if bool(parametrization.get("mobius_center", False)) != bool(mobius_center):
+        return False
+    if method == "cem":
+        # CEM results written before radius metadata used the old hardcoded 1.0.
+        try:
+            stored_radius = float(parametrization.get("cem_radius", 1.0))
+        except (TypeError, ValueError):
+            return False
+        return bool(np.isclose(stored_radius, cem_radius, rtol=0.0, atol=1e-12))
+    return True
+
+
 def _next_sample_index(sample_ids: List[str]) -> int:
     """Return an ID counter that cannot overwrite an existing completed sample."""
     indexes = []
@@ -1385,6 +1409,11 @@ def save_sample_signal(
         "deformation": _json_safe(meta.get("deformation", meta)),
         "parametrization": {
             "method": meta.get("parametrization_method"),
+            "cem_radius": (
+                float(meta.get("cem_radius", 1.2))
+                if meta.get("parametrization_method") == "cem" else None
+            ),
+            "mobius_center": bool(meta.get("mobius_center", False)),
             "success": False,
         },
         "random_seed": int(random_seed),
@@ -1433,13 +1462,32 @@ def save_spherical_parametrization(
         cem_eps: float = 1e-6,
         cem_max_iters: int = 100,
         cem_verbose: bool = False,
+        cem_radius: float = 1.2,
+        log_path: Optional[str] = None,
+        template_id: Optional[str] = None,
+        deformation_case: Optional[str] = None,
+        mobius_center: bool = False,
 ) -> Dict[str, str]:
-    """Compute and save spherical parametrization mesh and metadata label."""
+    """Compute, validate, and save a spherical map and its metadata.
+
+    A geometrically invalid map is retained for inspection.  When ``log_path``
+    is provided, its complete validation report is appended as a warning.
+    """
     root_path = Path(root)
     spheres_dir = root_path / "spheres"
     labels_dir = root_path / "labels"
     spheres_dir.mkdir(parents=True, exist_ok=True)
     labels_dir.mkdir(parents=True, exist_ok=True)
+
+    def log_cem_input_diagnostics(diagnostics: Dict[str, Any]) -> None:
+        if log_path is not None:
+            append_error_log(
+                log_path,
+                name,
+                "CEM input diagnostics: " + str(diagnostics["summary"]),
+                template_id=template_id,
+                deformation_case=deformation_case,
+            )
 
     sphere_vertices, sphere_meta = compute_spherical_parametrization(
         vertices=vertices,
@@ -1448,6 +1496,11 @@ def save_spherical_parametrization(
         cem_eps=cem_eps,
         cem_max_iters=cem_max_iters,
         cem_verbose=cem_verbose,
+        cem_radius=cem_radius,
+        mobius_center=mobius_center,
+        cem_input_diagnostics_callback=(
+            log_cem_input_diagnostics if method == "cem" else None
+        ),
         verify=True,
     )
 
@@ -1468,6 +1521,39 @@ def save_spherical_parametrization(
     }
     with open(sphere_label_path, "w") as fh:
         json.dump(sphere_label, fh, indent=2)
+
+    validation = sphere_meta.get("sphere_validation", {})
+    if log_path is not None and validation and not validation.get("is_valid", False):
+        append_error_log(
+            log_path,
+            name,
+            "spherical parametrization validation warning: "
+            + json.dumps(_json_safe(validation), sort_keys=True),
+            template_id=template_id,
+            deformation_case=deformation_case,
+        )
+
+    cem_diagnostics = sphere_meta.get("cem_diagnostics", {})
+    if log_path is not None and method == "cem" and cem_diagnostics:
+        cotangent = cem_diagnostics.get("cotangent_weights", {})
+        first_validation = cem_diagnostics.get("first_iteration_validation") or {}
+        final_validation = cem_diagnostics.get("final_validation") or {}
+        has_warning = (
+            int(cotangent.get("negative_weight_count", 0)) > 0
+            or (first_validation and not first_validation.get("is_valid", False))
+            or (final_validation and not final_validation.get("is_valid", False))
+        )
+        if has_warning:
+            append_error_log(
+                log_path,
+                name,
+                "CEM diagnostic warning: "
+                f"negative_cotangent_edges={int(cotangent.get('negative_weight_count', 0))}, "
+                f"affected_triangles={int(cotangent.get('affected_triangle_count', 0))}; "
+                + json.dumps(_json_safe(cem_diagnostics), sort_keys=True),
+                template_id=template_id,
+                deformation_case=deformation_case,
+            )
 
     return {
         "sphere": str(sphere_path.relative_to(root_path)),
@@ -1898,6 +1984,7 @@ def generate_dataset(
         cem_eps: float = 1e-6,
         cem_max_iters: int = 100,
         cem_verbose: bool = False,
+        cem_radius: float = 1.2,
         deformation_cases: Optional[List[str]] = None,
         create_splits: bool = False,
         split_tasks: Optional[List[str]] = None,
@@ -1913,6 +2000,7 @@ def generate_dataset(
         mnist_percentage: float = 100.0,
         mnist_total_count: Optional[int] = None,
         mnist_index_offset: int = 0,
+        mobius_center: bool = False,
 
 ) -> int:
     """Run the full dataset generation pipeline.
@@ -1963,6 +2051,10 @@ def generate_dataset(
     fixed_signal_center = _normalize_signal_center(signal_center)
     if param_method not in (None, "flash", "cem"):
         raise ValueError("param_method must be one of None, 'flash', or 'cem'")
+    if mobius_center and param_method != "cem":
+        raise ValueError("mobius_center requires param_method='cem'")
+    if not np.isfinite(cem_radius) or cem_radius <= 0.0:
+        raise ValueError("cem_radius must be finite and positive")
     
     # MNIST-specific validation
     if signal_type == "mnist":
@@ -2040,6 +2132,12 @@ def generate_dataset(
         for sample_id, label in completed_samples.items()
         if _label_generation_value(label, "template_id") in current_template_ids
         and _label_generation_value(label, "deformation_case") in requested_cases
+        and parametrization_request_matches(
+            label,
+            None if _label_generation_value(label, "deformation_case") == "case1_no" else param_method,
+            mobius_center,
+            cem_radius,
+        )
     ]
     # Skip the already-completed slots in this invocation.  The counter itself
     # is global to the output root so separately generated deformation cases
@@ -2105,6 +2203,8 @@ def generate_dataset(
             "cem_eps": cem_eps,
             "cem_max_iters": cem_max_iters,
             "cem_verbose": cem_verbose,
+            "cem_radius": cem_radius,
+            "mobius_center": mobius_center,
             "mnist_percentage": mnist_percentage,
             "mnist_total_count": mnist_total_count,
         }
@@ -2533,6 +2633,8 @@ def generate_dataset(
                         "mesh_quality": _json_safe(quality),
                         "deform_meta": _json_safe(deform_meta),
                         "parametrization_method": None if case_name == "case1_no" else param_method,
+                        "cem_radius": float(cem_radius),
+                        "mobius_center": bool(mobius_center),
                         "warnings": warnings,
                     }
                     if case_name in NOISE_CASES:
@@ -2914,6 +3016,11 @@ def generate_dataset(
                                     "deformation": _json_safe(generation_meta.get("deformation", generation_meta)),
                                     "parametrization": {
                                         "method": generation_meta.get("parametrization_method"),
+                                        "cem_radius": (
+                                            float(cem_radius)
+                                            if generation_meta.get("parametrization_method") == "cem" else None
+                                        ),
+                                        "mobius_center": bool(generation_meta.get("mobius_center", False)),
                                         "success": False,
                                     },
                                     "random_seed": int(sample_seed),
@@ -2990,6 +3097,11 @@ def generate_dataset(
                                 cem_eps=cem_eps,
                                 cem_max_iters=cem_max_iters,
                                 cem_verbose=cem_verbose,
+                                cem_radius=cem_radius,
+                                mobius_center=mobius_center,
+                                log_path=log_path,
+                                template_id=mesh_name,
+                                deformation_case=case_name,
                             )
                             paths.update(sphere_paths)
                             param_success = True
@@ -3007,6 +3119,8 @@ def generate_dataset(
                     label_updates: Dict[str, Any] = {
                         "parametrization": {
                             "method": effective_param_method,
+                            "cem_radius": float(cem_radius) if effective_param_method == "cem" else None,
+                            "mobius_center": bool(mobius_center),
                             "success": bool(param_success),
                             "error": param_error,
                         },
@@ -3194,7 +3308,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence epsilon (if --param-method cem).")
     parser.add_argument("--cem-max-iters", type=int, default=100, help="CEM max iterations (if --param-method cem).")
+    parser.add_argument("--cem-radius", type=float, default=1.2, help="CEM stereographic partition radius (if --param-method cem).")
     parser.add_argument("--cem-verbose", action="store_true", help="Enable CEM verbose logs (if --param-method cem).")
+    parser.add_argument(
+        "--mobius-center",
+        action="store_true",
+        help="Apply area-weighted Möbius centering after CEM (requires --param-method cem).",
+    )
     parser.add_argument(
         "--deformation-cases",
         type=str,
@@ -3276,6 +3396,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         cem_eps=args.cem_eps,
         cem_max_iters=args.cem_max_iters,
         cem_verbose=args.cem_verbose,
+        cem_radius=args.cem_radius,
+        mobius_center=args.mobius_center,
         deformation_cases=deformation_cases,
         create_splits=args.create_splits,
         split_tasks=split_tasks,
