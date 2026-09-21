@@ -5,3 +5,4 @@ pyglet
 nibabel
 meshio
 scikit-learn
+scipy
