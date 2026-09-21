@@ -89,11 +89,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence tolerance.")
     parser.add_argument("--cem-max-iters", type=int, default=100, help="Maximum CEM iterations.")
     parser.add_argument("--cem-radius", type=float, default=1.2, help="CEM stereographic partition radius.")
+    parser.add_argument("--use-idt-remesh", action="store_true", help="Use fixed-vertex IDT connectivity for CEM.")
+    parser.add_argument("--adaptive-radius", action="store_true", help="Search fallback radii after a collapsed CEM result.")
+    parser.add_argument(
+        "--cem-radius-candidates",
+        type=lambda value: tuple(float(item.strip()) for item in value.split(",") if item.strip()),
+        default=(1.1, 1.3, 1.4, 1.5),
+        help="Comma-separated fallback CEM radii.",
+    )
+    parser.add_argument("--reject-retry", action="store_true", help="Reject maps above the collapse limit after retrying.")
+    parser.add_argument("--cem-max-attempts", type=int, default=5, help="Maximum total CEM radius attempts.")
+    parser.add_argument("--cem-max-collapsed-faces", type=int, default=0, help="Accepted collapsed-face limit.")
     parser.add_argument("--cem-verbose", action="store_true", help="Verbose CEM output.")
     parser.add_argument(
         "--mobius-center",
         action="store_true",
         help="Apply area-weighted Möbius centering after CEM (requires --param-method cem).",
+    )
+    parser.add_argument(
+        "--anchor-diagnostics",
+        action="store_true",
+        help="Analyze CEM collapse by mesh-hop distance from Algorithm 4.1's anchor face.",
+    )
+    parser.add_argument(
+        "--anchor-strategy",
+        choices=("regular", "central_regular"),
+        default="regular",
+        help="Deterministic CEM Algorithm 4.1 anchor selection strategy.",
+    )
+    parser.add_argument(
+        "--anchor-regularity-percentile",
+        type=float,
+        default=10.0,
+        help="Inclusive normalized-regularity candidate percentile for central_regular.",
     )
     parser.add_argument(
         "--percentage",
@@ -246,8 +274,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.mobius_center and args.param_method != "cem":
         print("ERROR: --mobius-center requires --param-method cem.")
         return 1
+    if args.anchor_diagnostics and args.param_method != "cem":
+        print("ERROR: --anchor-diagnostics requires --param-method cem.")
+        return 1
+    if (args.use_idt_remesh or args.adaptive_radius or args.reject_retry) and args.param_method != "cem":
+        print("ERROR: CEM Phase 2 options require --param-method cem.")
+        return 1
     if not np.isfinite(args.cem_radius) or args.cem_radius <= 0.0:
         print("ERROR: --cem-radius must be finite and positive.")
+        return 1
+    if args.cem_max_attempts < 1:
+        print("ERROR: --cem-max-attempts must be at least 1.")
+        return 1
+    if args.cem_max_collapsed_faces < 0:
+        print("ERROR: --cem-max-collapsed-faces must be non-negative.")
+        return 1
+    if not args.cem_radius_candidates or any(
+        not np.isfinite(value) or value <= 0.0 for value in args.cem_radius_candidates
+    ):
+        print("ERROR: --cem-radius-candidates must contain finite positive values.")
+        return 1
+    if (
+        not np.isfinite(args.anchor_regularity_percentile)
+        or not 0.0 <= args.anchor_regularity_percentile <= 100.0
+    ):
+        print("ERROR: --anchor-regularity-percentile must be finite and in [0, 100].")
         return 1
     try:
         from spherepar.benchmark.dataset_generator import (
@@ -341,6 +392,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.param_method,
                 bool(args.mobius_center),
                 float(args.cem_radius),
+                bool(args.anchor_diagnostics),
+                args.anchor_strategy,
+                float(args.anchor_regularity_percentile),
+                bool(args.use_idt_remesh),
+                bool(args.adaptive_radius),
+                args.cem_radius_candidates,
+                bool(args.reject_retry),
+                int(args.cem_max_attempts),
+                int(args.cem_max_collapsed_faces),
             )
         }
         print(
@@ -367,7 +427,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("=" * 68)
     print("Create dataset structure from mesh files")
     print("=" * 68)
-    if mode == "FAUST":
+    if mode == "FAUST" and faust_dir is not None:
         print(f"FAUST dir       : {faust_dir}")
         print(f"Input meshes    : {faust_dir / 'registrations'}")
     elif mode == "CYLINDERS":
@@ -383,6 +443,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Param method    : {args.param_method}")
     print(f"CEM radius      : {args.cem_radius}")
     print(f"Möbius center  : {args.mobius_center}")
+    print(f"Anchor diagnose: {args.anchor_diagnostics}")
+    print(f"Anchor strategy: {args.anchor_strategy}")
+    print(f"Anchor pctile  : {args.anchor_regularity_percentile}")
+    print(f"IDT remesh     : {args.use_idt_remesh}")
+    print(f"Adaptive radius: {args.adaptive_radius}")
+    print(f"Reject/retry   : {args.reject_retry}")
     print("Filter non-g0   : enabled (required for spherical parametrization)")
     print(f"Resume          : {args.resume}")
     print(f"Overwrite       : {args.overwrite}")
@@ -428,13 +494,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                     cem_verbose=bool(args.cem_verbose),
                     cem_radius=float(args.cem_radius),
                     mobius_center=bool(args.mobius_center),
+                    anchor_diagnostics=bool(args.anchor_diagnostics),
+                    anchor_strategy=args.anchor_strategy,
+                    anchor_regularity_percentile=float(args.anchor_regularity_percentile),
+                    use_idt_remesh=bool(args.use_idt_remesh),
+                    adaptive_radius=bool(args.adaptive_radius),
+                    cem_radius_candidates=args.cem_radius_candidates,
+                    reject_retry=bool(args.reject_retry),
+                    cem_max_attempts=int(args.cem_max_attempts),
+                    cem_max_collapsed_faces=int(args.cem_max_collapsed_faces),
                     log_path=str(log_path),
                     template_id=sample_name,
                     deformation_case="case1_no",
                 )
                 sphere_rel = sphere_paths.get("sphere")
                 spherical_label_rel = sphere_paths.get("spherical_label")
-                param_success = True
+                param_success = bool(sphere_paths.get("parametrization_success", True))
+                param_error = sphere_paths.get("parametrization_error")
             except Exception as exc:  # noqa: BLE001
                 param_error = str(exc)
                 append_error_log(
@@ -472,6 +548,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "source_mesh": _resolve_relative(mesh_src_path, mesh_input.source_root),
                     "mobius_center": bool(args.mobius_center),
                     "cem_radius": float(args.cem_radius) if args.param_method == "cem" else None,
+                    "anchor_diagnostics": bool(args.anchor_diagnostics),
+                    "anchor_strategy": args.anchor_strategy if args.param_method == "cem" else None,
+                    "anchor_regularity_percentile": (
+                        float(args.anchor_regularity_percentile)
+                        if args.param_method == "cem" else None
+                    ),
+                    "use_idt_remesh": bool(args.use_idt_remesh),
+                    "adaptive_radius": bool(args.adaptive_radius),
+                    "cem_radius_candidates": list(args.cem_radius_candidates),
+                    "reject_retry": bool(args.reject_retry),
+                    "cem_max_attempts": int(args.cem_max_attempts),
+                    "cem_max_collapsed_faces": int(args.cem_max_collapsed_faces),
                 },
                 "paths": {
                     "mesh": mesh_rel,
@@ -526,7 +614,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "parametrization": {
                     "method": args.param_method,
                     "cem_radius": float(args.cem_radius) if args.param_method == "cem" else None,
+                    "cem_selected_radius": sphere_paths.get("cem_selected_radius") if sphere_rel else None,
                     "mobius_center": bool(args.mobius_center),
+                    "anchor_diagnostics": bool(args.anchor_diagnostics),
+                    "anchor_strategy": args.anchor_strategy if args.param_method == "cem" else None,
+                    "anchor_regularity_percentile": (
+                        float(args.anchor_regularity_percentile)
+                        if args.param_method == "cem" else None
+                    ),
+                    "use_idt_remesh": bool(args.use_idt_remesh),
+                    "adaptive_radius": bool(args.adaptive_radius),
+                    "cem_radius_candidates": list(args.cem_radius_candidates),
+                    "reject_retry": bool(args.reject_retry),
+                    "cem_max_attempts": int(args.cem_max_attempts),
+                    "cem_max_collapsed_faces": int(args.cem_max_collapsed_faces),
                     "success": bool(param_success),
                     "error": param_error,
                 },

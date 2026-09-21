@@ -106,8 +106,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"  CEM eps            : {args.cem_eps}")
     print(f"  CEM max iters      : {args.cem_max_iters}")
     print(f"  CEM radius         : {args.cem_radius}")
+    print(f"  IDT remesh         : {args.use_idt_remesh}")
+    print(f"  Adaptive radius    : {args.adaptive_radius}")
+    print(f"  Radius candidates  : {args.cem_radius_candidates}")
+    print(f"  Reject/retry       : {args.reject_retry}")
     print(f"  CEM verbose        : {args.cem_verbose}")
     print(f"  Möbius center      : {args.mobius_center}")
+    print(f"  Anchor diagnostics : {args.anchor_diagnostics}")
+    print(f"  Anchor strategy    : {args.anchor_strategy}")
+    print(f"  Anchor percentile  : {args.anchor_regularity_percentile}")
     print(f"  Deformation cases  : {args.deformation_cases}")
     print(f"  Create splits      : {args.create_splits}")
     print(f"  Split tasks        : {args.split_tasks}")
@@ -167,6 +174,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         cem_verbose=args.cem_verbose,
         cem_radius=args.cem_radius,
         mobius_center=args.mobius_center,
+        anchor_diagnostics=args.anchor_diagnostics,
+        anchor_strategy=args.anchor_strategy,
+        anchor_regularity_percentile=args.anchor_regularity_percentile,
+        use_idt_remesh=args.use_idt_remesh,
+        adaptive_radius=args.adaptive_radius,
+        cem_radius_candidates=args.cem_radius_candidates,
+        reject_retry=args.reject_retry,
+        cem_max_attempts=args.cem_max_attempts,
+        cem_max_collapsed_faces=args.cem_max_collapsed_faces,
         deformation_cases=deformation_cases,
         create_splits=args.create_splits,
         split_tasks=split_tasks,

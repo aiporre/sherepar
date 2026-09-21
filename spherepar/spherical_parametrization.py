@@ -1,12 +1,17 @@
 """Compatibility wrapper for spherical parametrization utilities."""
 from __future__ import annotations
 
-from typing import Tuple, Dict, Any, Callable, List, Optional
+from typing import Tuple, Dict, Any, Callable, List, Optional, Sequence
 
 import numpy as np
 import trimesh
 
-from spherepar.cem_parametrization import stretch_parametrization
+from spherepar.cem_parametrization import (
+    _cotangent_weight_diagnostics,
+    _face_angle_diagnostics,
+    stretch_parametrization,
+)
+from spherepar.idt_remesh import connectivity_hash, intrinsic_delaunay_remesh
 from spherepar.flash_parametrization import (  # noqa: F401
     flash_map,
     load_mesh_with_trimesh,
@@ -214,6 +219,15 @@ def compute_spherical_parametrization(
     verify: bool = True,
     mobius_center: bool = False,
     cem_input_diagnostics_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    anchor_diagnostics: bool = False,
+    anchor_strategy: str = "regular",
+    anchor_regularity_percentile: float = 10.0,
+    use_idt_remesh: bool = False,
+    adaptive_radius: bool = False,
+    cem_radius_candidates: Sequence[float] = (1.1, 1.3, 1.4, 1.5),
+    reject_retry: bool = False,
+    cem_max_attempts: int = 5,
+    cem_max_collapsed_faces: int = 0,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Compute spherical parametrization of a mesh.
     
@@ -239,6 +253,16 @@ def compute_spherical_parametrization(
         If True, apply area-weighted Möbius centering after CEM.
     cem_input_diagnostics_callback : callable, optional
         Receives CEM input-quality diagnostics immediately before Algorithm 4.1.
+    anchor_diagnostics : bool
+        If True, measure CEM collapse against Algorithm 4.1 anchor-hop distance.
+    anchor_strategy : str
+        CEM Algorithm 4.1 selector: ``regular`` or ``central_regular``.
+    anchor_regularity_percentile : float
+        Inclusive regularity percentile used by ``central_regular``.
+    use_idt_remesh, adaptive_radius, reject_retry : bool
+        Opt-in Phase 2 connectivity preprocessing, radius search, and
+        acceptance policy. Radius candidates and collapse/attempt limits are
+        recorded in the returned metadata; sphere faces remain original.
     
     Returns
     -------
@@ -252,13 +276,41 @@ def compute_spherical_parametrization(
 
     if mobius_center and method != "cem":
         raise ValueError("mobius_center is supported only with method='cem'")
+    if anchor_diagnostics and method != "cem":
+        raise ValueError("anchor_diagnostics is supported only with method='cem'")
+    if (use_idt_remesh or adaptive_radius or reject_retry) and method != "cem":
+        raise ValueError("CEM Phase 2 options are supported only with method='cem'")
 
     if method == "flash":
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         sphere_vertices = flash_map(mesh)
         meta: Dict[str, Any] = {"method": "flash"}
     elif method == "cem":
-        mesh_surf = MeshFactory.make_mesh("surf", vertices, faces)
+        original_mesh = MeshFactory.make_mesh("surf", vertices, faces)
+        if use_idt_remesh:
+            before_laplacian = original_mesh.get_laplacian_matrix(weight="cotangent").toarray()
+            before_cotangent = _cotangent_weight_diagnostics(original_mesh, before_laplacian)
+            before_angles = _face_angle_diagnostics(
+                original_mesh,
+                target_face_count=before_cotangent["affected_triangle_count"],
+            )
+            remeshed_faces, remeshing = intrinsic_delaunay_remesh(vertices, faces)
+            if not np.array_equal(vertices, vertices_orig) or len(vertices) != len(vertices_orig):
+                raise AssertionError("IDT preprocessing changed CEM vertices")
+            mesh_surf = MeshFactory.make_mesh("surf", vertices, remeshed_faces)
+        else:
+            remeshed_faces = faces
+            mesh_surf = original_mesh
+            remeshing = {
+                "enabled": False,
+                "flip_count": 0,
+                "converged": True,
+                "topology_hash_before": connectivity_hash(len(vertices), faces),
+                "topology_hash_after": connectivity_hash(len(vertices), faces),
+                "vertex_count_before": int(len(vertices)),
+                "vertex_count_after": int(len(vertices)),
+                "vertices_exactly_unchanged": True,
+            }
         stretch = stretch_parametrization(
             mesh_surf,
             eps=cem_eps,
@@ -266,15 +318,55 @@ def compute_spherical_parametrization(
             verbose=cem_verbose,
             radius=cem_radius,
             input_diagnostics_callback=cem_input_diagnostics_callback,
+            anchor_diagnostics=anchor_diagnostics,
+            anchor_strategy=anchor_strategy,
+            anchor_regularity_percentile=anchor_regularity_percentile,
+            adaptive_radius=adaptive_radius,
+            radius_candidates=cem_radius_candidates,
+            reject_retry=reject_retry,
+            max_attempts=cem_max_attempts,
+            max_collapsed_faces=cem_max_collapsed_faces,
+            validation_vertices=vertices_orig,
+            validation_faces=faces_orig,
         )
         sphere_vertices = stretch.convert_mesh().get_vertices_collection()
+        after_angles = stretch.cem_diagnostics["input_mesh_quality"]
+        after_cotangent = stretch.cem_diagnostics["cotangent_weights"]
+        if not use_idt_remesh:
+            before_angles = after_angles
+            before_cotangent = after_cotangent
+        remeshing.update({
+            "before": {
+                "input_mesh_quality": before_angles,
+                "cotangent_weights": before_cotangent,
+            },
+            "after": {
+                "input_mesh_quality": after_angles,
+                "cotangent_weights": after_cotangent,
+            },
+        })
         meta = {
             "method": "cem",
             "eps": float(cem_eps),
             "max_iters": int(cem_max_iters),
             "verbose": bool(cem_verbose),
             "cem_radius": float(cem_radius),
+            "cem_selected_radius": float(stretch.cem_diagnostics["selected_radius"]),
+            "use_idt_remesh": bool(use_idt_remesh),
+            "adaptive_radius": bool(adaptive_radius),
+            "cem_radius_candidates": [float(value) for value in cem_radius_candidates],
+            "reject_retry": bool(reject_retry),
+            "cem_max_attempts": int(cem_max_attempts),
+            "cem_max_collapsed_faces": int(cem_max_collapsed_faces),
+            "anchor_strategy": anchor_strategy,
+            "anchor_regularity_percentile": float(anchor_regularity_percentile),
             "cem_diagnostics": stretch.cem_diagnostics,
+            "remeshing": remeshing,
+            "radius_attempts": stretch.cem_diagnostics["radius_attempts"],
+            "acceptance": stretch.cem_diagnostics["acceptance"],
+            "cache_statistics": (
+                (stretch.cem_diagnostics.get("anchor") or {}).get("eccentricity_cache")
+            ),
             "mobius_center": bool(mobius_center),
         }
         if mobius_center:

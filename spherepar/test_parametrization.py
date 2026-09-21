@@ -12,6 +12,12 @@ from spherepar.cem_parametrization import (dirichlet_parametrization, stretch_pa
 
 
 class Test(TestCase):
+    def test_dirichlet_energy_includes_paper_half_factor(self):
+        laplacian = np.asarray([[1.0, -1.0], [-1.0, 1.0]])
+        harmonic_map = np.asarray([0.0 + 0.0j, 1.0 + 0.0j], dtype=np.complex128)
+        # Pi^-1(0)=(0,0,-1), Pi^-1(1)=(1,0,0), so the unscaled trace is 2.
+        self.assertAlmostEqual(_dirichlet_energy(laplacian, harmonic_map), 1.0)
+
     def test_dirichlet_spherepar(self):
         # basic_form = ellipsoid(0.6, 0.10, 0.16, levelset=True)
         basic_form = ellipsoid(1, 1,0.5, levelset=True)

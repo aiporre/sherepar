@@ -68,6 +68,14 @@ def test_file_importer_cem_radius_defaults_and_override():
     assert parser.parse_args(base + ["--cem-radius", "1.6"]).cem_radius == 1.6
 
 
+def test_file_importer_anchor_diagnostics_is_opt_in():
+    importer = _load_importer_module()
+    parser = importer.build_arg_parser()
+    base = ["--cylinders-dir", "input", "--output-root", "output"]
+    assert parser.parse_args(base).anchor_diagnostics is False
+    assert parser.parse_args(base + ["--anchor-diagnostics"]).anchor_diagnostics is True
+
+
 def test_spherical_validation_warning_is_logged_without_rejecting_sphere(tmp_path: Path, monkeypatch):
     from spherepar.benchmark import dataset_generator
 
@@ -168,3 +176,33 @@ def test_cem_diagnostic_warning_is_logged_without_rejecting_sphere(tmp_path: Pat
     assert "CEM diagnostic warning" in log_text
     assert "affected_triangles=2" in log_text
     assert log_text.index("CEM input diagnostics") < log_text.index("CEM diagnostic warning")
+
+
+def test_reject_retry_retains_sphere_and_returns_structured_failure(tmp_path: Path, monkeypatch):
+    from spherepar.benchmark import dataset_generator
+
+    mesh = trimesh.creation.icosphere(subdivisions=1)
+    metadata = {
+        "method": "cem",
+        "cem_selected_radius": 1.1,
+        "acceptance": {"accepted": False, "reason": "collapsed face count 2 exceeds threshold 0"},
+        "cem_diagnostics": {
+            "cotangent_weights": {"negative_weight_count": 0},
+            "radius_attempts": [],
+            "acceptance": {"accepted": False},
+        },
+        "sphere_validation": {"is_valid": False, "errors": ["collapsed"]},
+    }
+    monkeypatch.setattr(
+        dataset_generator,
+        "compute_spherical_parametrization",
+        lambda **kwargs: (np.asarray(mesh.vertices).copy(), metadata),
+    )
+    paths = dataset_generator.save_spherical_parametrization(
+        root=str(tmp_path), name="rejected", vertices=mesh.vertices, faces=mesh.faces,
+        method="cem", reject_retry=True,
+    )
+    assert paths["parametrization_success"] is False
+    assert "rejected" in paths["parametrization_error"]
+    assert paths["cem_selected_radius"] == 1.1
+    assert (tmp_path / paths["sphere"]).is_file()
