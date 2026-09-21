@@ -807,6 +807,15 @@ def parametrization_request_matches(
     method: Optional[str],
     mobius_center: bool,
     cem_radius: float,
+    anchor_diagnostics: bool = False,
+    anchor_strategy: str = "regular",
+    anchor_regularity_percentile: float = 10.0,
+    use_idt_remesh: bool = False,
+    adaptive_radius: bool = False,
+    cem_radius_candidates: Sequence[float] = (1.1, 1.3, 1.4, 1.5),
+    reject_retry: bool = False,
+    cem_max_attempts: int = 5,
+    cem_max_collapsed_faces: int = 0,
 ) -> bool:
     """Return whether a completed label matches the requested sphere settings."""
     parametrization = label.get("parametrization", {})
@@ -817,6 +826,49 @@ def parametrization_request_matches(
     if bool(parametrization.get("mobius_center", False)) != bool(mobius_center):
         return False
     if method == "cem":
+        if bool(parametrization.get("use_idt_remesh", False)) != bool(use_idt_remesh):
+            return False
+        if bool(parametrization.get("adaptive_radius", False)) != bool(adaptive_radius):
+            return False
+        if bool(parametrization.get("reject_retry", False)) != bool(reject_retry):
+            return False
+        if adaptive_radius or reject_retry:
+            try:
+                stored_candidates = tuple(
+                    float(value) for value in parametrization.get(
+                        "cem_radius_candidates", (1.1, 1.3, 1.4, 1.5)
+                    )
+                )
+                stored_attempts = int(parametrization.get("cem_max_attempts", 5))
+            except (TypeError, ValueError):
+                return False
+            if stored_candidates != tuple(float(value) for value in cem_radius_candidates):
+                return False
+            if stored_attempts != int(cem_max_attempts):
+                return False
+        if reject_retry and int(parametrization.get("cem_max_collapsed_faces", 0)) != int(cem_max_collapsed_faces):
+            return False
+        stored_strategy = str(parametrization.get("anchor_strategy", "regular"))
+        if stored_strategy != anchor_strategy:
+            return False
+        if anchor_strategy == "central_regular":
+            try:
+                stored_percentile = float(
+                    parametrization.get("anchor_regularity_percentile", 10.0)
+                )
+            except (TypeError, ValueError):
+                return False
+            if not np.isclose(
+                stored_percentile,
+                anchor_regularity_percentile,
+                rtol=0.0,
+                atol=1e-12,
+            ):
+                return False
+        # An ordinary request may reuse a richer diagnostic artifact, but an
+        # opt-in request must never silently resume from a legacy sidecar.
+        if anchor_diagnostics and not bool(parametrization.get("anchor_diagnostics", False)):
+            return False
         # CEM results written before radius metadata used the old hardcoded 1.0.
         try:
             stored_radius = float(parametrization.get("cem_radius", 1.0))
@@ -1414,6 +1466,21 @@ def save_sample_signal(
                 if meta.get("parametrization_method") == "cem" else None
             ),
             "mobius_center": bool(meta.get("mobius_center", False)),
+            "anchor_diagnostics": bool(meta.get("anchor_diagnostics", False)),
+            "anchor_strategy": (
+                str(meta.get("anchor_strategy", "regular"))
+                if meta.get("parametrization_method") == "cem" else None
+            ),
+            "anchor_regularity_percentile": (
+                float(meta.get("anchor_regularity_percentile", 10.0))
+                if meta.get("parametrization_method") == "cem" else None
+            ),
+            "use_idt_remesh": bool(meta.get("use_idt_remesh", False)),
+            "adaptive_radius": bool(meta.get("adaptive_radius", False)),
+            "cem_radius_candidates": list(meta.get("cem_radius_candidates", (1.1, 1.3, 1.4, 1.5))),
+            "reject_retry": bool(meta.get("reject_retry", False)),
+            "cem_max_attempts": int(meta.get("cem_max_attempts", 5)),
+            "cem_max_collapsed_faces": int(meta.get("cem_max_collapsed_faces", 0)),
             "success": False,
         },
         "random_seed": int(random_seed),
@@ -1467,7 +1534,16 @@ def save_spherical_parametrization(
         template_id: Optional[str] = None,
         deformation_case: Optional[str] = None,
         mobius_center: bool = False,
-) -> Dict[str, str]:
+        anchor_diagnostics: bool = False,
+        anchor_strategy: str = "regular",
+        anchor_regularity_percentile: float = 10.0,
+        use_idt_remesh: bool = False,
+        adaptive_radius: bool = False,
+        cem_radius_candidates: Sequence[float] = (1.1, 1.3, 1.4, 1.5),
+        reject_retry: bool = False,
+        cem_max_attempts: int = 5,
+        cem_max_collapsed_faces: int = 0,
+) -> Dict[str, Any]:
     """Compute, validate, and save a spherical map and its metadata.
 
     A geometrically invalid map is retained for inspection.  When ``log_path``
@@ -1498,6 +1574,15 @@ def save_spherical_parametrization(
         cem_verbose=cem_verbose,
         cem_radius=cem_radius,
         mobius_center=mobius_center,
+        anchor_diagnostics=anchor_diagnostics,
+        anchor_strategy=anchor_strategy,
+        anchor_regularity_percentile=anchor_regularity_percentile,
+        use_idt_remesh=use_idt_remesh,
+        adaptive_radius=adaptive_radius,
+        cem_radius_candidates=cem_radius_candidates,
+        reject_retry=reject_retry,
+        cem_max_attempts=cem_max_attempts,
+        cem_max_collapsed_faces=cem_max_collapsed_faces,
         cem_input_diagnostics_callback=(
             log_cem_input_diagnostics if method == "cem" else None
         ),
@@ -1544,20 +1629,67 @@ def save_spherical_parametrization(
             or (final_validation and not final_validation.get("is_valid", False))
         )
         if has_warning:
+            # The anchor payload contains per-vertex vectors and has its own
+            # compact log entry below; keep the pre-existing warning readable.
+            warning_diagnostics = {
+                key: value for key, value in cem_diagnostics.items() if key != "anchor"
+            }
             append_error_log(
                 log_path,
                 name,
                 "CEM diagnostic warning: "
                 f"negative_cotangent_edges={int(cotangent.get('negative_weight_count', 0))}, "
                 f"affected_triangles={int(cotangent.get('affected_triangle_count', 0))}; "
-                + json.dumps(_json_safe(cem_diagnostics), sort_keys=True),
+                + json.dumps(_json_safe(warning_diagnostics), sort_keys=True),
                 template_id=template_id,
                 deformation_case=deformation_case,
             )
 
+        for attempt in cem_diagnostics.get("radius_attempts", []):
+            append_error_log(
+                log_path,
+                name,
+                "[CEM radius] " + json.dumps(_json_safe(attempt), sort_keys=True),
+                template_id=template_id,
+                deformation_case=deformation_case,
+            )
+        acceptance = cem_diagnostics.get("acceptance", {})
+        if reject_retry and not acceptance.get("accepted", False):
+            append_error_log(
+                log_path,
+                name,
+                "[CEM reject] " + json.dumps(_json_safe(acceptance), sort_keys=True),
+                template_id=template_id,
+                deformation_case=deformation_case,
+            )
+
+    anchor = cem_diagnostics.get("anchor") if isinstance(cem_diagnostics, dict) else None
+    if log_path is not None and method == "cem" and anchor_diagnostics and anchor:
+        stats = anchor.get("statistics", {})
+        append_error_log(
+            log_path,
+            name,
+            "[CEM anchor] "
+            f"stage={anchor.get('analyzed_sphere_stage')}; "
+            f"anchor_ids={anchor.get('vertex_ids')}; "
+            f"collapsed_vertices={anchor.get('collapsed_vertex_count')}; "
+            f"non_collapsed_vertices={anchor.get('non_collapsed_vertex_count')}; "
+            + json.dumps(_json_safe(stats), sort_keys=True),
+            template_id=template_id,
+            deformation_case=deformation_case,
+        )
+
+    acceptance = sphere_meta.get("acceptance", {})
+    rejected = bool(reject_retry and not acceptance.get("accepted", False))
+    rejection_error = None
+    if rejected:
+        rejection_error = "CEM parametrization rejected: " + str(acceptance.get("reason"))
     return {
         "sphere": str(sphere_path.relative_to(root_path)),
         "spherical_label": str(sphere_label_path.relative_to(root_path)),
+        "parametrization_success": not rejected,
+        "parametrization_error": rejection_error,
+        "cem_selected_radius": sphere_meta.get("cem_selected_radius"),
     }
 
 
@@ -2001,6 +2133,15 @@ def generate_dataset(
         mnist_total_count: Optional[int] = None,
         mnist_index_offset: int = 0,
         mobius_center: bool = False,
+        anchor_diagnostics: bool = False,
+        anchor_strategy: str = "regular",
+        anchor_regularity_percentile: float = 10.0,
+        use_idt_remesh: bool = False,
+        adaptive_radius: bool = False,
+        cem_radius_candidates: Sequence[float] = (1.1, 1.3, 1.4, 1.5),
+        reject_retry: bool = False,
+        cem_max_attempts: int = 5,
+        cem_max_collapsed_faces: int = 0,
 
 ) -> int:
     """Run the full dataset generation pipeline.
@@ -2053,8 +2194,23 @@ def generate_dataset(
         raise ValueError("param_method must be one of None, 'flash', or 'cem'")
     if mobius_center and param_method != "cem":
         raise ValueError("mobius_center requires param_method='cem'")
+    if anchor_diagnostics and param_method != "cem":
+        raise ValueError("anchor_diagnostics requires param_method='cem'")
+    if anchor_strategy not in ("regular", "central_regular"):
+        raise ValueError("anchor_strategy must be 'regular' or 'central_regular'")
+    if not np.isfinite(anchor_regularity_percentile) or not 0.0 <= anchor_regularity_percentile <= 100.0:
+        raise ValueError("anchor_regularity_percentile must be finite and in [0, 100]")
     if not np.isfinite(cem_radius) or cem_radius <= 0.0:
         raise ValueError("cem_radius must be finite and positive")
+    if (use_idt_remesh or adaptive_radius or reject_retry) and param_method != "cem":
+        raise ValueError("CEM Phase 2 options require param_method='cem'")
+    if cem_max_attempts < 1:
+        raise ValueError("cem_max_attempts must be at least 1")
+    if cem_max_collapsed_faces < 0:
+        raise ValueError("cem_max_collapsed_faces must be non-negative")
+    cem_radius_candidates = tuple(float(value) for value in cem_radius_candidates)
+    if any(not np.isfinite(value) or value <= 0.0 for value in cem_radius_candidates):
+        raise ValueError("cem_radius_candidates must be finite and positive")
     
     # MNIST-specific validation
     if signal_type == "mnist":
@@ -2137,6 +2293,15 @@ def generate_dataset(
             None if _label_generation_value(label, "deformation_case") == "case1_no" else param_method,
             mobius_center,
             cem_radius,
+            anchor_diagnostics,
+            anchor_strategy,
+            anchor_regularity_percentile,
+            use_idt_remesh,
+            adaptive_radius,
+            cem_radius_candidates,
+            reject_retry,
+            cem_max_attempts,
+            cem_max_collapsed_faces,
         )
     ]
     # Skip the already-completed slots in this invocation.  The counter itself
@@ -2205,6 +2370,15 @@ def generate_dataset(
             "cem_verbose": cem_verbose,
             "cem_radius": cem_radius,
             "mobius_center": mobius_center,
+            "anchor_diagnostics": anchor_diagnostics,
+            "anchor_strategy": anchor_strategy,
+            "anchor_regularity_percentile": anchor_regularity_percentile,
+            "use_idt_remesh": use_idt_remesh,
+            "adaptive_radius": adaptive_radius,
+            "cem_radius_candidates": cem_radius_candidates,
+            "reject_retry": reject_retry,
+            "cem_max_attempts": cem_max_attempts,
+            "cem_max_collapsed_faces": cem_max_collapsed_faces,
             "mnist_percentage": mnist_percentage,
             "mnist_total_count": mnist_total_count,
         }
@@ -2635,6 +2809,15 @@ def generate_dataset(
                         "parametrization_method": None if case_name == "case1_no" else param_method,
                         "cem_radius": float(cem_radius),
                         "mobius_center": bool(mobius_center),
+                        "anchor_diagnostics": bool(anchor_diagnostics),
+                        "anchor_strategy": anchor_strategy,
+                        "anchor_regularity_percentile": float(anchor_regularity_percentile),
+                        "use_idt_remesh": bool(use_idt_remesh),
+                        "adaptive_radius": bool(adaptive_radius),
+                        "cem_radius_candidates": list(cem_radius_candidates),
+                        "reject_retry": bool(reject_retry),
+                        "cem_max_attempts": int(cem_max_attempts),
+                        "cem_max_collapsed_faces": int(cem_max_collapsed_faces),
                         "warnings": warnings,
                     }
                     if case_name in NOISE_CASES:
@@ -3021,6 +3204,23 @@ def generate_dataset(
                                             if generation_meta.get("parametrization_method") == "cem" else None
                                         ),
                                         "mobius_center": bool(generation_meta.get("mobius_center", False)),
+                                        "anchor_diagnostics": bool(
+                                            generation_meta.get("anchor_diagnostics", False)
+                                        ),
+                                        "anchor_strategy": (
+                                            anchor_strategy
+                                            if generation_meta.get("parametrization_method") == "cem" else None
+                                        ),
+                                        "anchor_regularity_percentile": (
+                                            float(anchor_regularity_percentile)
+                                            if generation_meta.get("parametrization_method") == "cem" else None
+                                        ),
+                                        "use_idt_remesh": bool(use_idt_remesh),
+                                        "adaptive_radius": bool(adaptive_radius),
+                                        "cem_radius_candidates": list(cem_radius_candidates),
+                                        "reject_retry": bool(reject_retry),
+                                        "cem_max_attempts": int(cem_max_attempts),
+                                        "cem_max_collapsed_faces": int(cem_max_collapsed_faces),
                                         "success": False,
                                     },
                                     "random_seed": int(sample_seed),
@@ -3099,12 +3299,22 @@ def generate_dataset(
                                 cem_verbose=cem_verbose,
                                 cem_radius=cem_radius,
                                 mobius_center=mobius_center,
+                                anchor_diagnostics=anchor_diagnostics,
+                                anchor_strategy=anchor_strategy,
+                                anchor_regularity_percentile=anchor_regularity_percentile,
+                                use_idt_remesh=use_idt_remesh,
+                                adaptive_radius=adaptive_radius,
+                                cem_radius_candidates=cem_radius_candidates,
+                                reject_retry=reject_retry,
+                                cem_max_attempts=cem_max_attempts,
+                                cem_max_collapsed_faces=cem_max_collapsed_faces,
                                 log_path=log_path,
                                 template_id=mesh_name,
                                 deformation_case=case_name,
                             )
                             paths.update(sphere_paths)
-                            param_success = True
+                            param_success = bool(sphere_paths.get("parametrization_success", True))
+                            param_error = sphere_paths.get("parametrization_error")
                         except Exception as exc:  # noqa: BLE001
                             param_error = str(exc)
                             append_error_log(
@@ -3120,7 +3330,22 @@ def generate_dataset(
                         "parametrization": {
                             "method": effective_param_method,
                             "cem_radius": float(cem_radius) if effective_param_method == "cem" else None,
+                            "cem_selected_radius": paths.get("cem_selected_radius"),
+                            "use_idt_remesh": bool(use_idt_remesh),
+                            "adaptive_radius": bool(adaptive_radius),
+                            "cem_radius_candidates": list(cem_radius_candidates),
+                            "reject_retry": bool(reject_retry),
+                            "cem_max_attempts": int(cem_max_attempts),
+                            "cem_max_collapsed_faces": int(cem_max_collapsed_faces),
                             "mobius_center": bool(mobius_center),
+                            "anchor_diagnostics": bool(anchor_diagnostics),
+                            "anchor_strategy": (
+                                anchor_strategy if effective_param_method == "cem" else None
+                            ),
+                            "anchor_regularity_percentile": (
+                                float(anchor_regularity_percentile)
+                                if effective_param_method == "cem" else None
+                            ),
                             "success": bool(param_success),
                             "error": param_error,
                         },
@@ -3309,11 +3534,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence epsilon (if --param-method cem).")
     parser.add_argument("--cem-max-iters", type=int, default=100, help="CEM max iterations (if --param-method cem).")
     parser.add_argument("--cem-radius", type=float, default=1.2, help="CEM stereographic partition radius (if --param-method cem).")
+    parser.add_argument("--use-idt-remesh", action="store_true", help="Use fixed-vertex intrinsic-Delaunay connectivity for CEM.")
+    parser.add_argument("--adaptive-radius", action="store_true", help="Retry collapsed CEM maps with candidate radii.")
+    parser.add_argument(
+        "--cem-radius-candidates",
+        type=lambda value: tuple(float(item.strip()) for item in value.split(",") if item.strip()),
+        default=(1.1, 1.3, 1.4, 1.5),
+        help="Comma-separated fallback CEM radii.",
+    )
+    parser.add_argument("--reject-retry", action="store_true", help="Reject maps above the collapse limit after radius retries.")
+    parser.add_argument("--cem-max-attempts", type=int, default=5, help="Maximum total radius attempts, including the base radius.")
+    parser.add_argument("--cem-max-collapsed-faces", type=int, default=0, help="Maximum collapsed original faces accepted by reject/retry.")
     parser.add_argument("--cem-verbose", action="store_true", help="Enable CEM verbose logs (if --param-method cem).")
     parser.add_argument(
         "--mobius-center",
         action="store_true",
         help="Apply area-weighted Möbius centering after CEM (requires --param-method cem).",
+    )
+    parser.add_argument(
+        "--anchor-diagnostics",
+        action="store_true",
+        help="Analyze CEM collapse by mesh-hop distance from Algorithm 4.1's anchor face.",
+    )
+    parser.add_argument(
+        "--anchor-strategy",
+        choices=("regular", "central_regular"),
+        default="regular",
+        help="Deterministic CEM Algorithm 4.1 anchor selection strategy.",
+    )
+    parser.add_argument(
+        "--anchor-regularity-percentile",
+        type=float,
+        default=10.0,
+        help="Inclusive normalized-regularity candidate percentile for central_regular.",
     )
     parser.add_argument(
         "--deformation-cases",
@@ -3398,6 +3651,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         cem_verbose=args.cem_verbose,
         cem_radius=args.cem_radius,
         mobius_center=args.mobius_center,
+        anchor_diagnostics=args.anchor_diagnostics,
+        anchor_strategy=args.anchor_strategy,
+        anchor_regularity_percentile=args.anchor_regularity_percentile,
+        use_idt_remesh=args.use_idt_remesh,
+        adaptive_radius=args.adaptive_radius,
+        cem_radius_candidates=args.cem_radius_candidates,
+        reject_retry=args.reject_retry,
+        cem_max_attempts=args.cem_max_attempts,
+        cem_max_collapsed_faces=args.cem_max_collapsed_faces,
         deformation_cases=deformation_cases,
         create_splits=args.create_splits,
         split_tasks=split_tasks,

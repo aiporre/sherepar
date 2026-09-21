@@ -13,6 +13,36 @@ SPHERE_MIN_AREA_RELATIVE_TO_MEDIAN = 1e-4
 SPHERE_ORIENTATION_TOLERANCE = 1e-12
 
 
+def collapsed_face_geometry(
+    sphere_vertices: np.ndarray,
+    faces: np.ndarray,
+    relative_threshold: float = SPHERE_MIN_AREA_RELATIVE_TO_MEDIAN,
+    absolute_twice_area_threshold: float = SPHERE_ORIENTATION_TOLERANCE,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Return triangles, twice-areas, collapsed IDs, and the shared threshold.
+
+    Keeping this calculation here ensures validation, generation-time anchor
+    diagnostics, and the standalone CEM plotting utility classify collapsed
+    faces identically.
+    """
+    if relative_threshold < 0.0 or absolute_twice_area_threshold < 0.0:
+        raise ValueError("area thresholds must be non-negative")
+
+    vertices = np.asarray(sphere_vertices, dtype=np.float64)
+    faces_array = np.asarray(faces, dtype=np.int64)
+    triangles = vertices[faces_array]
+    twice_areas = np.linalg.norm(
+        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        axis=1,
+    )
+    threshold = max(
+        float(absolute_twice_area_threshold),
+        float(relative_threshold) * float(np.median(twice_areas)),
+    )
+    collapsed_face_ids = np.flatnonzero(twice_areas <= threshold)
+    return triangles, twice_areas, collapsed_face_ids, threshold
+
+
 def validate_sphere_parameterization(
     mesh_vertices: np.ndarray,
     mesh_faces: np.ndarray,
@@ -73,16 +103,13 @@ def validate_sphere_parameterization(
         if min_separation <= SPHERE_MIN_VERTEX_SEPARATION:
             report["errors"].append("sphere has collapsed or near-duplicate vertices")
 
-        triangles = unit_vertices[mesh_faces]
+        triangles, twice_area, collapsed_face_ids, area_threshold = collapsed_face_geometry(
+            unit_vertices, mesh_faces
+        )
         cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
-        twice_area = np.linalg.norm(cross, axis=1)
         median_twice_area = float(np.median(twice_area))
         min_twice_area = float(twice_area.min())
-        area_threshold = max(
-            SPHERE_ORIENTATION_TOLERANCE,
-            SPHERE_MIN_AREA_RELATIVE_TO_MEDIAN * median_twice_area,
-        )
-        degenerate_count = int(np.count_nonzero(twice_area <= area_threshold))
+        degenerate_count = int(len(collapsed_face_ids))
         report.update({
             "min_twice_area": min_twice_area,
             "median_twice_area": median_twice_area,
