@@ -64,12 +64,17 @@ Implements Algorithm 4.1 (initial spherical conformal map) and Algorithm 4.2
 # =============================================================================
 """
 
-from typing import Any, Callable, Optional
+import copy
+from typing import Any, Callable, Optional, Sequence
 import warnings
 
 import numpy as np
 
 from spherepar.mesh import MeshSurf, StretchFunction, Vector, Vertex
+from spherepar.cem_anchor_diagnostics import (
+    collect_anchor_geometry,
+    compute_anchor_collapse_diagnostics,
+)
 from spherepar.parametrization_validation import validate_sphere_parameterization
 
 # ---------------------------------------------------------------------------
@@ -77,6 +82,22 @@ from spherepar.parametrization_validation import validate_sphere_parameterizatio
 # ---------------------------------------------------------------------------
 _EPS_PROJ = 1e-12   # minimum |1 - z| in stereographic projection (north-pole guard)
 _EPS_INV  = 1e-14   # minimum |h|^2 in Mobius inversion step (zero-division guard)
+_ANCHOR_STRATEGIES = ("regular", "central_regular")
+
+
+def _validate_anchor_options(
+    anchor_strategy: str,
+    anchor_regularity_percentile: float,
+) -> None:
+    if anchor_strategy not in _ANCHOR_STRATEGIES:
+        raise ValueError(
+            "anchor_strategy must be one of " + ", ".join(repr(value) for value in _ANCHOR_STRATEGIES)
+        )
+    if (
+        not np.isfinite(anchor_regularity_percentile)
+        or not 0.0 <= anchor_regularity_percentile <= 100.0
+    ):
+        raise ValueError("anchor_regularity_percentile must be finite and in [0, 100]")
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +150,7 @@ def _inverse_stereo_projection(h: np.ndarray) -> np.ndarray:
 def _dirichlet_energy(Ld: np.ndarray, h: np.ndarray) -> float:
     """Dirichlet energy of the map encoded by h.
 
-    E_D(f) = sum_k  g_k^T L_D g_k,   g = Pi^{-1}(h) in R^{N x 3}
+    E_D(f) = 1/2 trace(g^T L_D g),   g = Pi^{-1}(h) in R^{N x 3}
 
     Equivalently: (1/2) sum_{edges (i,j)} w_ij ||f_i - f_j||^2
 
@@ -144,7 +165,7 @@ def _dirichlet_energy(Ld: np.ndarray, h: np.ndarray) -> float:
     """
     g   = _inverse_stereo_projection(h)   # (N, 3)
     Ldg = Ld @ g                          # (N, 3)
-    return float(np.einsum('ij,ij->', g, Ldg))
+    return 0.5 * float(np.einsum('ij,ij->', g, Ldg))
 
 
 def _cotangent_weight_diagnostics(
@@ -356,7 +377,12 @@ def _assert_mesh_valid(mesh: MeshSurf) -> None:
 # ---------------------------------------------------------------------------
 # Algorithm 4.1 - initial spherical conformal parameterisation
 # ---------------------------------------------------------------------------
-def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
+def dirichlet_parametrization(
+    mesh: MeshSurf,
+    anchor_diagnostics: bool = False,
+    anchor_strategy: str = "regular",
+    anchor_regularity_percentile: float = 10.0,
+) -> StretchFunction:
     """Algorithm 4.1: initial spherical conformal parameterisation.
 
     Follows eq. (4.6) of the paper exactly.  The returned StretchFunction
@@ -365,12 +391,27 @@ def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
 
     Assertions / diagnostics are embedded after each numbered step.
     """
+    _validate_anchor_options(anchor_strategy, anchor_regularity_percentile)
+
     # ----- Mesh validity -----------------------------------------------------
     _assert_mesh_valid(mesh)
 
     # ----- Step 1: most-regular triangle [va, vb, vc] ------------------------
-    face_reg = mesh.get_most_regular_face()
+    face_reg = (
+        mesh.get_most_regular_face()
+        if anchor_strategy == "regular"
+        else mesh.get_central_regular_face(anchor_regularity_percentile)
+    )
     a, b, c  = face_reg.u, face_reg.v, face_reg.w
+    anchor_meta = (
+        collect_anchor_geometry(
+            mesh,
+            face_reg,
+            anchor_strategy=anchor_strategy,
+            anchor_regularity_percentile=anchor_regularity_percentile,
+        )
+        if anchor_diagnostics else None
+    )
 
     # ----- Step 2: B = {a, b, c},  I = {0,...,N-1} \ B ----------------------
     B = [a.id, b.id, c.id]
@@ -512,13 +553,57 @@ def dirichlet_parametrization(mesh: MeshSurf) -> StretchFunction:
     print(f"[A4.1] After rescaling: g3 in [{z3.min():.4f}, {z3.max():.4f}] "
           f"(balanced hemispheres → close to [-1, 1])")
 
-    return StretchFunction(mesh, h)
+    result = StretchFunction(mesh, h)
+    result.anchor_diagnostics = anchor_meta
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Algorithm 4.2 - CEM (conformally-exact-map) iteration
 # ---------------------------------------------------------------------------
-def stretch_parametrization(mesh: MeshSurf,
+def _prepare_cem(
+    mesh: MeshSurf,
+    *,
+    input_diagnostics_callback: Optional[Callable[[dict[str, Any]], None]],
+    anchor_diagnostics: bool,
+    anchor_strategy: str,
+    anchor_regularity_percentile: float,
+) -> tuple[StretchFunction, np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Run fixed CEM setup exactly once for one radius search."""
+    mesh_faces = mesh.get_faces_collection()
+    laplacian = mesh.get_laplacian_matrix(weight="cotangent").toarray()
+    cotangent = _cotangent_weight_diagnostics(mesh, laplacian)
+    angles = _face_angle_diagnostics(
+        mesh, target_face_count=cotangent["affected_triangle_count"]
+    )
+    _print_cem_input_diagnostics(angles, cotangent)
+    if input_diagnostics_callback is not None:
+        input_diagnostics_callback({
+            "summary": _cem_input_log_message(angles, cotangent),
+            "input_mesh_quality": angles,
+            "cotangent_weights": cotangent,
+        })
+    if not cotangent["is_intrinsic_delaunay"]:
+        warnings.warn(
+            "CEM input has "
+            f"{cotangent['negative_weight_count']} negative cotangent edge weight(s), "
+            f"affecting {cotangent['affected_triangle_count']} triangle(s); "
+            "the intrinsic-Delaunay convex-combination guarantee does not apply.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    initial = dirichlet_parametrization(
+        mesh,
+        anchor_diagnostics=anchor_diagnostics,
+        anchor_strategy=anchor_strategy,
+        anchor_regularity_percentile=anchor_regularity_percentile,
+    )
+    if initial.h.shape != (len(mesh.vertices),):
+        raise AssertionError("Algorithm 4.1 returned the wrong harmonic-map shape")
+    return initial, laplacian, angles, cotangent
+
+
+def _stretch_parametrization_attempt(mesh: MeshSurf,
                             eps: float = 1e-6,
                             max_iters: int = 1000,
                             verbose: bool = True,
@@ -526,6 +611,14 @@ def stretch_parametrization(mesh: MeshSurf,
                             input_diagnostics_callback: Optional[
                                 Callable[[dict[str, Any]], None]
                             ] = None,
+                            anchor_diagnostics: bool = False,
+                            anchor_strategy: str = "regular",
+                            anchor_regularity_percentile: float = 10.0,
+                            _prepared: Optional[
+                                tuple[StretchFunction, np.ndarray, dict[str, Any], dict[str, Any]]
+                            ] = None,
+                            validation_vertices: Optional[np.ndarray] = None,
+                            validation_faces: Optional[np.ndarray] = None,
                             ) -> StretchFunction:
     """Algorithm 4.2: CEM iteration to minimise the Dirichlet energy on S^2.
 
@@ -540,11 +633,15 @@ def stretch_parametrization(mesh: MeshSurf,
     verbose   : print per-iteration diagnostics
     radius    : stereographic partition radius from Algorithm 4.2
     input_diagnostics_callback : optional callback invoked before Algorithm 4.1
+    anchor_diagnostics : collect anchor-hop/collapse diagnostics when true
+    anchor_strategy : deterministic Algorithm 4.1 anchor selector
+    anchor_regularity_percentile : candidate percentile for ``central_regular``
 
     Returns
     -------
     StretchFunction  - the improved conformal map (h stored in C)
     """
+    _validate_anchor_options(anchor_strategy, anchor_regularity_percentile)
     if not np.isfinite(radius) or radius <= 0.0:
         raise ValueError("radius must be finite and positive")
     if not np.isfinite(eps) or eps < 0.0:
@@ -552,39 +649,25 @@ def stretch_parametrization(mesh: MeshSurf,
     if max_iters < 1:
         raise ValueError("max_iters must be at least 1")
 
-    # ----- Input-mesh preflight, before Algorithm 4.1 ------------------------
-    mesh_vertices = mesh.get_vertices_collection()
-    mesh_faces = mesh.get_faces_collection()
-
-    # Cotangent Laplacian L_D is fixed throughout Algorithm 4.2.
-    # BUG 4 (fixed): old code recomputed Ls (stretch Laplacian) every iteration.
-    # Algorithm 4.2 uses L_D (cotangent Laplacian) in all iterations.
-    Ld = mesh.get_laplacian_matrix(weight='cotangent').toarray()
-    cotangent_diagnostics = _cotangent_weight_diagnostics(mesh, Ld)
-    angle_diagnostics = _face_angle_diagnostics(
-        mesh,
-        target_face_count=cotangent_diagnostics["affected_triangle_count"],
+    mesh_vertices = (
+        mesh.get_vertices_collection()
+        if validation_vertices is None else np.asarray(validation_vertices, dtype=np.float64)
     )
-    _print_cem_input_diagnostics(angle_diagnostics, cotangent_diagnostics)
-    if input_diagnostics_callback is not None:
-        input_diagnostics_callback({
-            "summary": _cem_input_log_message(angle_diagnostics, cotangent_diagnostics),
-            "input_mesh_quality": angle_diagnostics,
-            "cotangent_weights": cotangent_diagnostics,
-        })
-    if not cotangent_diagnostics["is_intrinsic_delaunay"]:
-        warnings.warn(
-            "CEM input has "
-            f"{cotangent_diagnostics['negative_weight_count']} negative cotangent "
-            "edge weight(s), affecting "
-            f"{cotangent_diagnostics['affected_triangle_count']} triangle(s); "
-            "the intrinsic-Delaunay convex-combination guarantee does not apply.",
-            RuntimeWarning,
-            stacklevel=2,
+    mesh_faces = (
+        mesh.get_faces_collection()
+        if validation_faces is None else np.asarray(validation_faces, dtype=np.int32)
+    )
+    if _prepared is None:
+        _prepared = _prepare_cem(
+            mesh,
+            input_diagnostics_callback=input_diagnostics_callback,
+            anchor_diagnostics=anchor_diagnostics,
+            anchor_strategy=anchor_strategy,
+            anchor_regularity_percentile=anchor_regularity_percentile,
         )
-
-    # ----- Run Algorithm 4.1 -------------------------------------------------
-    dirichlet_stretch = dirichlet_parametrization(mesh)
+    initial_stretch, Ld, angle_diagnostics, cotangent_diagnostics = _prepared
+    dirichlet_stretch = StretchFunction(mesh, initial_stretch.h.copy())
+    dirichlet_stretch.anchor_diagnostics = copy.deepcopy(initial_stretch.anchor_diagnostics)
     h = dirichlet_stretch.h.copy()   # complex map (stereo projection of sphere)
 
     N   = len(h)
@@ -716,8 +799,10 @@ def stretch_parametrization(mesh: MeshSurf,
         )
 
     dirichlet_stretch.h = h
-    dirichlet_stretch.cem_diagnostics = {
+    cem_diagnostics: dict[str, Any] = {
         "radius": float(radius),
+        "anchor_strategy": anchor_strategy,
+        "anchor_regularity_percentile": float(anchor_regularity_percentile),
         "input_mesh_quality": angle_diagnostics,
         "cotangent_weights": cotangent_diagnostics,
         "first_iteration_partition": first_iteration_partition,
@@ -734,4 +819,164 @@ def stretch_parametrization(mesh: MeshSurf,
             "max_iters": int(max_iters),
         },
     }
+    if anchor_diagnostics:
+        anchor_meta = dirichlet_stretch.anchor_diagnostics
+        if anchor_meta is None:
+            raise RuntimeError("Algorithm 4.1 did not capture requested anchor diagnostics")
+        anchor_meta.update(
+            compute_anchor_collapse_diagnostics(
+                mesh_vertices,
+                mesh_faces,
+                final_sphere_pts,
+                anchor_meta["minimum_hop_distances"],
+                sphere_stage="pre_mobius_cem",
+            )
+        )
+        cem_diagnostics["anchor"] = anchor_meta
+    dirichlet_stretch.cem_diagnostics = cem_diagnostics
     return dirichlet_stretch
+
+
+def _ordered_radii(base: float, candidates: Sequence[float], maximum: int) -> list[float]:
+    if maximum < 1:
+        raise ValueError("cem_max_attempts must be at least 1")
+    ordered: list[float] = []
+    for value in (base, *candidates):
+        radius = float(value)
+        if not np.isfinite(radius) or radius <= 0.0:
+            raise ValueError("CEM radius candidates must be finite and positive")
+        if not any(np.isclose(radius, old, rtol=0.0, atol=1e-12) for old in ordered):
+            ordered.append(radius)
+    return ordered[:min(maximum, 5)]
+
+
+def stretch_parametrization(
+    mesh: MeshSurf,
+    eps: float = 1e-6,
+    max_iters: int = 1000,
+    verbose: bool = True,
+    radius: float = 1.2,
+    input_diagnostics_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    anchor_diagnostics: bool = False,
+    anchor_strategy: str = "regular",
+    anchor_regularity_percentile: float = 10.0,
+    adaptive_radius: bool = False,
+    radius_candidates: Sequence[float] = (1.1, 1.3, 1.4, 1.5),
+    reject_retry: bool = False,
+    max_attempts: int = 5,
+    max_collapsed_faces: int = 0,
+    validation_vertices: Optional[np.ndarray] = None,
+    validation_faces: Optional[np.ndarray] = None,
+) -> StretchFunction:
+    """Run CEM, optionally searching radii from one shared harmonic map."""
+    _validate_anchor_options(anchor_strategy, anchor_regularity_percentile)
+    if not np.isfinite(radius) or radius <= 0.0:
+        raise ValueError("radius must be finite and positive")
+    if max_collapsed_faces < 0:
+        raise ValueError("cem_max_collapsed_faces must be non-negative")
+    radii = _ordered_radii(radius, radius_candidates, max_attempts)
+    prepared = _prepare_cem(
+        mesh,
+        input_diagnostics_callback=input_diagnostics_callback,
+        anchor_diagnostics=anchor_diagnostics,
+        anchor_strategy=anchor_strategy,
+        anchor_regularity_percentile=anchor_regularity_percentile,
+    )
+    attempts: list[tuple[int, StretchFunction, int]] = []
+    records: list[dict[str, Any]] = []
+    search_enabled = bool(adaptive_radius or reject_retry)
+    for order, attempt_radius in enumerate(radii):
+        if order > 0:
+            if not search_enabled:
+                break
+            if attempts and attempts[0][2] <= max_collapsed_faces:
+                break
+        try:
+            result = _stretch_parametrization_attempt(
+                mesh,
+                eps=eps,
+                max_iters=max_iters,
+                verbose=verbose,
+                radius=attempt_radius,
+                anchor_diagnostics=anchor_diagnostics,
+                anchor_strategy=anchor_strategy,
+                anchor_regularity_percentile=anchor_regularity_percentile,
+                _prepared=prepared,
+                validation_vertices=validation_vertices,
+                validation_faces=validation_faces,
+            )
+            validation = result.cem_diagnostics["final_validation"]
+            collapsed = int(validation.get("degenerate_face_count", 0))
+            convergence = result.cem_diagnostics["convergence"]
+            attempts.append((order, result, collapsed))
+            record = {
+                "attempt_order": int(order),
+                "radius": float(attempt_radius),
+                "numerical_success": True,
+                "collapsed_face_count": collapsed,
+                "validation_valid": bool(validation.get("is_valid", False)),
+                "convergence": copy.deepcopy(convergence),
+                "selected": False,
+                "error": None,
+            }
+            records.append(record)
+            print(
+                f"[CEM radius] radius={attempt_radius:g} collapsed={collapsed} "
+                f"convergence={convergence.get('stop_reason')} selected=pending"
+            )
+            if collapsed == 0:
+                break
+        except Exception as exc:  # numerical failures do not abort later radii
+            records.append({
+                "attempt_order": int(order),
+                "radius": float(attempt_radius),
+                "numerical_success": False,
+                "collapsed_face_count": None,
+                "validation_valid": False,
+                "convergence": None,
+                "selected": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            print(f"[CEM radius] radius={attempt_radius:g} numerical_failure={type(exc).__name__}: {exc}")
+            if not search_enabled:
+                raise
+    if not attempts:
+        errors = "; ".join(record["error"] or "unknown failure" for record in records)
+        raise RuntimeError(f"all CEM radius attempts failed numerically: {errors}")
+    selected_order, selected, selected_collapsed = min(
+        attempts,
+        key=lambda item: (item[2], round(abs(radii[item[0]] - radius), 12), item[0]),
+    )
+    for record in records:
+        record["selected"] = record["attempt_order"] == selected_order
+        record["selection_status"] = "selected" if record["selected"] else "not_selected"
+        record["threshold"] = int(max_collapsed_faces)
+    accepted = selected_collapsed <= max_collapsed_faces
+    reason = (
+        f"collapsed face count {selected_collapsed} is within threshold {max_collapsed_faces}"
+        if accepted else
+        f"collapsed face count {selected_collapsed} exceeds threshold {max_collapsed_faces}"
+    )
+    for record in records:
+        record["selection_reason"] = reason if record["selected"] else "higher collapsed-face count or tie-break rank"
+    selected.cem_diagnostics["radius_attempts"] = records
+    selected.cem_diagnostics["acceptance"] = {
+        "policy_enabled": bool(reject_retry),
+        "accepted": bool(accepted if reject_retry else True),
+        "geometric_threshold_met": bool(accepted),
+        "max_collapsed_faces": int(max_collapsed_faces),
+        "selected_collapsed_face_count": int(selected_collapsed),
+        "reason": reason,
+    }
+    selected.cem_diagnostics["selected_radius"] = float(radii[selected_order])
+    print(
+        f"[CEM radius] radius={radii[selected_order]:g} collapsed={selected_collapsed} "
+        f"convergence={selected.cem_diagnostics['convergence'].get('stop_reason')} "
+        f"selected=true threshold={max_collapsed_faces} reason={reason}"
+    )
+    if reject_retry and not accepted:
+        print(
+            f"[CEM reject] radius={radii[selected_order]:g} collapsed={selected_collapsed} "
+            f"threshold={max_collapsed_faces} reason={reason}"
+        )
+    return selected
