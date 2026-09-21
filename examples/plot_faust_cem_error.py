@@ -26,6 +26,7 @@ python examples/plot_faust_cem_error.py \
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -42,6 +43,12 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from spherepar.mobius_centering import apply_inverse_mobius_sequence
+from spherepar.cem_anchor_diagnostics import (
+    collect_anchor_geometry,
+    compute_anchor_collapse_diagnostics,
+)
+from spherepar.mesh import MeshFactory
+from spherepar.parametrization_validation import collapsed_face_geometry
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +80,11 @@ def parse_args() -> argparse.Namespace:
         "--pre-centering",
         action="store_true",
         help="Undo the stored Möbius transform and plot the original CEM sphere.",
+    )
+    parser.add_argument(
+        "--anchor-diagnostics",
+        action="store_true",
+        help="Analyze and plot collapse versus Algorithm 4.1 anchor-hop distance.",
     )
     parser.add_argument(
         "--relative-area-threshold",
@@ -208,20 +220,134 @@ def collapsed_geometry(
     relative_threshold: float,
     absolute_twice_area_threshold: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    if relative_threshold < 0.0 or absolute_twice_area_threshold < 0.0:
-        raise ValueError("area thresholds must be non-negative")
+    return collapsed_face_geometry(
+        vertices,
+        faces,
+        relative_threshold=relative_threshold,
+        absolute_twice_area_threshold=absolute_twice_area_threshold,
+    )
 
-    triangles = vertices[faces]
-    twice_areas = np.linalg.norm(
-        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
-        axis=1,
+
+def resolve_anchor_diagnostics(
+    mesh_vertices: np.ndarray,
+    mesh_faces: np.ndarray,
+    sidecar: Optional[dict],
+) -> Tuple[dict, str]:
+    """Reuse stored anchor geometry or reconstruct it for a legacy sidecar."""
+    metadata = ((sidecar or {}).get("metadata") or {})
+    if bool(metadata.get("use_idt_remesh", False)):
+        from spherepar.idt_remesh import intrinsic_delaunay_remesh
+
+        replayed_faces, replay = intrinsic_delaunay_remesh(mesh_vertices, mesh_faces)
+        stored_remeshing = metadata.get("remeshing") or {}
+        stored_hash = stored_remeshing.get("topology_hash_after")
+        if stored_hash is not None and stored_hash != replay["topology_hash_after"]:
+            raise ValueError("stored IDT topology hash does not match deterministic replay")
+        anchor_faces = replayed_faces
+    else:
+        anchor_faces = mesh_faces
+    mesh = MeshFactory.make_mesh("surf", mesh_vertices, anchor_faces)
+    cem_diagnostics = metadata.get("cem_diagnostics") or {}
+    stored = cem_diagnostics.get("anchor")
+    strategy = str(
+        (stored or {}).get(
+            "strategy",
+            metadata.get("anchor_strategy", cem_diagnostics.get("anchor_strategy", "regular")),
+        )
     )
-    threshold = max(
-        absolute_twice_area_threshold,
-        relative_threshold * float(np.median(twice_areas)),
+    percentile = float(
+        (stored or {}).get(
+            "regularity_percentile",
+            metadata.get(
+                "anchor_regularity_percentile",
+                cem_diagnostics.get("anchor_regularity_percentile", 10.0),
+            ),
+        )
     )
-    collapsed_face_ids = np.flatnonzero(twice_areas <= threshold)
-    return triangles, twice_areas, collapsed_face_ids, threshold
+    if strategy == "regular":
+        anchor_face = mesh.get_most_regular_face()
+    elif strategy == "central_regular":
+        anchor_face = mesh.get_central_regular_face(percentile)
+    else:
+        raise ValueError(f"unknown stored CEM anchor strategy: {strategy!r}")
+    reconstructed = collect_anchor_geometry(
+        mesh,
+        anchor_face,
+        anchor_strategy=strategy,
+        anchor_regularity_percentile=percentile,
+    )
+    if stored is None:
+        return reconstructed, "reconstructed (legacy sidecar)"
+
+    stored_ids = [int(value) for value in stored.get("vertex_ids", [])]
+    if stored_ids != reconstructed["vertex_ids"]:
+        raise ValueError(
+            "stored CEM anchor IDs do not match deterministic reconstruction: "
+            f"stored={stored_ids}, reconstructed={reconstructed['vertex_ids']}"
+        )
+    if len(stored.get("minimum_hop_distances", [])) != len(mesh_vertices):
+        raise ValueError("stored CEM anchor hop-distance vector has the wrong length")
+    # Legacy stored payloads predate normalized score/eccentricity fields.
+    # Preserve their measured collapse data while filling deterministic
+    # geometry fields from the verified reconstruction.
+    return {**reconstructed, **stored}, "stored sidecar metadata"
+
+
+def print_anchor_summary(anchor: dict, source: str) -> None:
+    """Print a compact, stable diagnostic table."""
+    print("\nCEM anchor-distance diagnostic")
+    print(f"Anchor source: {source}")
+    print(f"Strategy:      {anchor.get('strategy', 'regular')}")
+    print(f"Percentile:    {anchor.get('regularity_percentile', 10.0):g}")
+    print(f"Anchor IDs:    {anchor['vertex_ids']}")
+    print(f"Positions:     {anchor['positions']}")
+    print(f"Regularity:    {anchor['regularity']:.8e}")
+    print(f"Normalized:    {anchor['scale_normalized_regularity']:.8e}")
+    print(f"Eccentricity:  {anchor['vertex_eccentricities']}")
+    print(f"Edge lengths:  {anchor['edge_lengths']}")
+    print(
+        "Mesh edge mean/median: "
+        f"{anchor['mesh_edge_length_mean']:.8e} / {anchor['mesh_edge_length_median']:.8e}"
+    )
+    print("group             count    mean hops  median hops")
+    for key, label in (("collapsed", "collapsed"), ("non_collapsed", "non-collapsed")):
+        group = anchor["distance_summary"][key]
+        mean = "null" if group["mean"] is None else f"{group['mean']:.6g}"
+        median = "null" if group["median"] is None else f"{group['median']:.6g}"
+        print(f"{label:<17} {group['count']:>6}  {mean:>11}  {median:>11}")
+    print("statistic                     value          p-value  status")
+    for key, label in (
+        ("mann_whitney_u", "Mann-Whitney U"),
+        ("spearman_collapsed_flag", "Spearman collapsed"),
+        ("spearman_collapse_severity", "Spearman severity"),
+    ):
+        item = anchor["statistics"][key]
+        value = "null" if item["statistic"] is None else f"{item['statistic']:.7g}"
+        p_value = "null" if item["p_value"] is None else f"{item['p_value']:.7g}"
+        print(f"{label:<29} {value:>10}  {p_value:>15}  {item['status']}")
+
+
+def append_anchor_log(sphere_path: Path, sample_id: str, mode: str, anchor: dict) -> Path:
+    """Append the plot-time result to the owning dataset's error log."""
+    dataset_root = sphere_path.parent.parent
+    log_path = dataset_root / "logs" / "errors.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {
+        "stage": mode,
+        "anchor_ids": anchor["vertex_ids"],
+        "collapsed_vertex_count": anchor["collapsed_vertex_count"],
+        "non_collapsed_vertex_count": anchor["non_collapsed_vertex_count"],
+        "distance_summary": anchor["distance_summary"],
+        "statistics": anchor["statistics"],
+    }
+    with log_path.open("a") as file:
+        file.write(
+            f"{timestamp}  {sample_id}  [CEM anchor] "
+            + json.dumps(payload, sort_keys=True)
+            + "\n"
+        )
+    return log_path
 
 
 def collapsed_edge_points(
@@ -484,11 +610,55 @@ def plot_original_mesh_highlights(
     return figure
 
 
+def plot_anchor_distances(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    anchor: dict,
+    mode: str,
+) -> plt.Figure:
+    """Plot the sphere with continuous minimum anchor-hop vertex colors."""
+    distances = np.asarray(anchor["minimum_hop_distances"], dtype=np.float64)
+    anchor_ids = np.asarray(anchor["vertex_ids"], dtype=np.int64)
+    triangles = vertices[faces]
+    figure = plt.figure(figsize=(12, 12))
+    ax = figure.add_subplot(111, projection="3d")
+    ax.add_collection3d(Poly3DCollection(
+        triangles,
+        facecolor=(0.75, 0.78, 0.82, 0.08),
+        edgecolor=(0.2, 0.2, 0.2, 0.08),
+        linewidth=0.12,
+    ))
+    anchor_face = vertices[anchor_ids]
+    ax.add_collection3d(Poly3DCollection(
+        [anchor_face],
+        facecolor=(1.0, 0.0, 0.75, 0.72),
+        edgecolor=(0.35, 0.0, 0.25, 1.0),
+        linewidth=2.0,
+    ))
+    colored = ax.scatter(
+        vertices[:, 0], vertices[:, 1], vertices[:, 2],
+        c=distances, cmap="viridis", s=7, depthshade=False,
+    )
+    ax.scatter(
+        vertices[anchor_ids, 0], vertices[anchor_ids, 1], vertices[anchor_ids, 2],
+        color="white", edgecolor="black", marker="*", s=180, linewidth=1.2,
+        depthshade=False, label="Algorithm 4.1 anchor vertices",
+    )
+    figure.colorbar(colored, ax=ax, shrink=0.65, pad=0.08, label="minimum anchor-hop distance")
+    ax.legend(loc="upper right")
+    set_equal_axes(ax, vertices)
+    ax.set(xlabel="x", ylabel="y", zlabel="z")
+    ax.set_title(f"FAUST {mode}: distance from Algorithm 4.1 anchor face")
+    figure.tight_layout()
+    return figure
+
+
 def main() -> None:
     args = parse_args()
     sphere_path, sidecar_path, mesh_path = resolve_inputs(args)
     vertices, faces, mode = load_sphere(sphere_path, sidecar_path, args.pre_centering)
     mesh_vertices, mesh_faces = load_original_mesh(mesh_path, faces)
+    sidecar = _load_sidecar(sidecar_path)
     (
         minimum_angles_degrees,
         negative_edges,
@@ -585,6 +755,24 @@ def main() -> None:
             f"< {args.angle_threshold:g} degrees"
         ),
     )
+    anchor_figure: Optional[plt.Figure] = None
+    if args.anchor_diagnostics:
+        anchor, anchor_source = resolve_anchor_diagnostics(
+            mesh_vertices, mesh_faces, sidecar
+        )
+        anchor.update(compute_anchor_collapse_diagnostics(
+            mesh_vertices,
+            mesh_faces,
+            vertices,
+            anchor["minimum_hop_distances"],
+            sphere_stage=("pre_mobius_cem" if args.pre_centering else "displayed_stored_sphere"),
+            relative_threshold=args.relative_area_threshold,
+            absolute_twice_area_threshold=args.absolute_twice_area_threshold,
+        ))
+        print_anchor_summary(anchor, anchor_source)
+        anchor_log = append_anchor_log(sphere_path, sphere_path.stem, mode, anchor)
+        print(f"Appended anchor log: {anchor_log}")
+        anchor_figure = plot_anchor_distances(vertices, faces, anchor, mode)
 
     if args.output is not None:
         output = args.output.expanduser().resolve()
@@ -605,12 +793,20 @@ def main() -> None:
         )
         low_angle_figure.savefig(angle_output, dpi=180, bbox_inches="tight")
         print(f"Saved angle plot:    {angle_output}")
+        if anchor_figure is not None:
+            anchor_output = output.with_name(
+                f"{output.stem}_anchor_distance{output.suffix}"
+            )
+            anchor_figure.savefig(anchor_output, dpi=180, bbox_inches="tight")
+            print(f"Saved anchor plot:   {anchor_output}")
 
     if args.no_show:
         plt.close(figure)
         plt.close(mesh_figure)
         plt.close(negative_weight_figure)
         plt.close(low_angle_figure)
+        if anchor_figure is not None:
+            plt.close(anchor_figure)
     else:
         plt.show()
 
