@@ -254,6 +254,29 @@ class Face:
         reg_2 = (a + b + c) * np.ones_like(reg_1) / 3
         return float(np.linalg.norm(reg_1 - reg_2))
 
+    def scale_normalized_regularity(self) -> float:
+        """Return a dimensionless, scale-invariant triangle regularity.
+
+        The VSEM paper's expression is the unnormalized norm returned by
+        :meth:`regularity`.  Dividing by this face's own mean edge length is a
+        scale-invariant extension that preserves the score's shape meaning.
+        """
+        edge_lengths = np.asarray(
+            (
+                Vector(self.u, self.v).norm(),
+                Vector(self.u, self.w).norm(),
+                Vector(self.v, self.w).norm(),
+            ),
+            dtype=np.float64,
+        )
+        mean_edge_length = float(np.mean(edge_lengths))
+        if not np.isfinite(mean_edge_length) or mean_edge_length <= 0.0:
+            raise ValueError("face mean edge length must be finite and positive")
+        score = self.regularity() / mean_edge_length
+        if not np.isfinite(score):
+            raise ValueError("scale-normalized face regularity must be finite")
+        return float(score)
+
     def __str__(self):
         return f"Face(u={self.u}, v={self.v}, w={self.w}, id={self.id})"
 
@@ -596,6 +619,59 @@ class MeshSurf(Mesh):
                 f_best = f
         return f_best
 
+    def get_central_regular_face(self, regularity_percentile: float = 10.0) -> Face:
+        """Select a graph-central face from the most regular faces.
+
+        Faces at or below the inclusive percentile cutoff of scale-normalized
+        regularity are candidates.  Candidate vertices are the only BFS
+        sources, but every BFS traverses the full graph so its maximum is the
+        true vertex eccentricity.  Selection is deterministic by
+        ``(mean vertex eccentricity, normalized regularity, face ID tuple)``.
+
+        Complexity is ``O(F + K(V + E))``, where ``K`` is the number of unique
+        vertices belonging to candidate faces.  On ``tr_reg_000``, the default
+        percentile yields 1,378 candidate faces and 2,232 BFS sources and took
+        about 17 seconds in the feasibility check.
+        """
+        if not np.isfinite(regularity_percentile) or not 0.0 <= regularity_percentile <= 100.0:
+            raise ValueError("regularity_percentile must be finite and in [0, 100]")
+        if not self.faces:
+            raise ValueError("cannot select an anchor from a mesh without faces")
+
+        faces = list(self.faces.values())
+        scores = np.asarray(
+            [face.scale_normalized_regularity() for face in faces],
+            dtype=np.float64,
+        )
+        cutoff = float(np.percentile(scores, regularity_percentile))
+        candidates = [
+            (face, float(score))
+            for face, score in zip(faces, scores)
+            if score <= cutoff
+        ]
+
+        # Local import avoids a module cycle: diagnostics imports MeshSurf for
+        # type-safe public helpers used by this selector.
+        from spherepar.cem_anchor_diagnostics import candidate_vertex_eccentricities
+
+        candidate_vertex_ids = sorted({
+            int(vertex_id)
+            for face, _ in candidates
+            for vertex_id in face.id
+        })
+        eccentricities, cache_diagnostics = candidate_vertex_eccentricities(
+            self, candidate_vertex_ids
+        )
+        self.anchor_cache_diagnostics = cache_diagnostics
+        return min(
+            candidates,
+            key=lambda item: (
+                float(np.mean([eccentricities[int(vertex_id)] for vertex_id in item[0].id])),
+                item[1],
+                tuple(int(vertex_id) for vertex_id in item[0].id),
+            ),
+        )[0]
+
 
 class StretchFunction:
     def __init__(self, mesh: Mesh, harmonic_map: np.ndarray):
@@ -604,6 +680,8 @@ class StretchFunction:
         self.h = harmonic_map
         # Populated by CEM without changing the long-standing return type.
         self.cem_diagnostics = None
+        # Populated by Algorithm 4.1 only when anchor diagnostics are requested.
+        self.anchor_diagnostics = None
 
     @property
     def h(self):
