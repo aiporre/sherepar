@@ -174,6 +174,14 @@ Dirichlet energy, that candidate is discarded and CEM returns the preceding
 accepted iterate. The radius and diagnostics are stored in the spherical JSON
 sidecar, and the radius is also stored in the primary label for resume matching.
 
+Phase 2 CEM controls are opt in: `--use-idt-remesh` flips connectivity without
+moving vertices, `--adaptive-radius` searches the configured
+`--cem-radius-candidates`, and `--reject-retry` applies
+`--cem-max-collapsed-faces` after at most `--cem-max-attempts`. The sphere OBJ
+always retains the original mesh faces. A reject/retry failure also retains its
+best sphere and spherical JSON for diagnosis, but the primary label records
+`parametrization.success=false`, a rejection `error`, and the retained paths.
+
 Imports resume by default: only samples with complete mesh, signal, label, and
 required sphere artifacts are skipped. Use `--no-resume` to regenerate every
 selected input and overwrite its artifacts.
@@ -654,3 +662,8 @@ Fields vary by case, typically including:
 | `method` | `str \| null` | `flash`, `cem`, or `null` when not run. |
 | `success` | `bool` | Whether spherical parametrization succeeded. |
 | `error` | `str \| null` | Error text if parametrization failed. |
+| `cem_radius` | `float \| null` | Requested base CEM radius. |
+| `cem_selected_radius` | `float \| null` | Radius selected by the optional search. |
+| `use_idt_remesh` | `bool` | Whether connectivity-only IDT preprocessing was requested. |
+| `adaptive_radius` | `bool` | Whether collapsed results trigger radius search. |
+| `reject_retry` | `bool` | Whether the collapse acceptance policy is enforced. |
