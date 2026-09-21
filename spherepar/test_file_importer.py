@@ -206,3 +206,37 @@ def test_reject_retry_retains_sphere_and_returns_structured_failure(tmp_path: Pa
     assert "rejected" in paths["parametrization_error"]
     assert paths["cem_selected_radius"] == 1.1
     assert (tmp_path / paths["sphere"]).is_file()
+
+
+def test_flash_validation_failure_retains_sphere_and_returns_structured_failure(tmp_path: Path, monkeypatch):
+    from spherepar.benchmark import dataset_generator
+
+    mesh = trimesh.creation.icosphere(subdivisions=1)
+    metadata = {
+        "method": "flash",
+        "success": False,
+        "error": "FLASH Beltrami solver failed after all landmark retries",
+        "flash_diagnostics": {
+            "success": False,
+            "retained_stage": "harmonic",
+            "solver_attempts": [{"attempt": 1, "error": "singular matrix"}],
+        },
+        "sphere_validation": {"is_valid": True, "errors": []},
+    }
+    monkeypatch.setattr(
+        dataset_generator,
+        "compute_spherical_parametrization",
+        lambda **kwargs: (np.asarray(mesh.vertices).copy(), metadata),
+    )
+
+    paths = dataset_generator.save_spherical_parametrization(
+        root=str(tmp_path),
+        name="flash_failed",
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        method="flash",
+    )
+
+    assert paths["parametrization_success"] is False
+    assert "FLASH Beltrami solver failed" in paths["parametrization_error"]
+    assert (tmp_path / paths["sphere"]).is_file()

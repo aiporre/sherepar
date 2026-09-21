@@ -1680,9 +1680,16 @@ def save_spherical_parametrization(
         )
 
     acceptance = sphere_meta.get("acceptance", {})
-    rejected = bool(reject_retry and not acceptance.get("accepted", False))
+    flash_failed = bool(method == "flash" and sphere_meta.get("success") is False)
+    rejected = bool(flash_failed or (reject_retry and not acceptance.get("accepted", False)))
     rejection_error = None
-    if rejected:
+    if flash_failed:
+        rejection_error = str(
+            sphere_meta.get("error")
+            or sphere_meta.get("flash_diagnostics", {}).get("error")
+            or "FLASH parametrization failed validation"
+        )
+    elif rejected:
         rejection_error = "CEM parametrization rejected: " + str(acceptance.get("reason"))
     return {
         "sphere": str(sphere_path.relative_to(root_path)),

@@ -14,6 +14,7 @@ from spherepar.cem_parametrization import (
 from spherepar.idt_remesh import connectivity_hash, intrinsic_delaunay_remesh
 from spherepar.flash_parametrization import (  # noqa: F401
     flash_map,
+    flash_map_with_diagnostics,
     load_mesh_with_trimesh,
 )
 from spherepar.mesh import MeshFactory
@@ -283,8 +284,12 @@ def compute_spherical_parametrization(
 
     if method == "flash":
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-        sphere_vertices = flash_map(mesh)
-        meta: Dict[str, Any] = {"method": "flash"}
+        sphere_vertices, flash_diagnostics = flash_map_with_diagnostics(mesh)
+        meta: Dict[str, Any] = {
+            "method": "flash",
+            "flash_diagnostics": flash_diagnostics,
+            "success": bool(flash_diagnostics.get("success", False)),
+        }
     elif method == "cem":
         original_mesh = MeshFactory.make_mesh("surf", vertices, faces)
         if use_idt_remesh:
@@ -413,5 +418,15 @@ def compute_spherical_parametrization(
         meta["sphere_validation"] = validate_sphere_parameterization(
             vertices_orig, faces_orig, sphere_vertices, faces
         )
-    
+        if method == "flash":
+            validation = meta["sphere_validation"]
+            if not validation.get("is_valid", False):
+                meta["success"] = False
+                meta["error"] = "FLASH sphere validation failed: " + "; ".join(validation.get("errors", []))
+            elif not meta.get("success", False):
+                meta["error"] = meta.get("flash_diagnostics", {}).get("error") or "FLASH solver did not produce a validated map"
+
+    if method == "flash" and not meta.get("success", False) and "error" not in meta:
+        meta["error"] = meta.get("flash_diagnostics", {}).get("error") or "FLASH solver did not produce a validated map"
+
     return sphere_vertices, meta
