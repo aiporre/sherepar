@@ -156,13 +156,23 @@ For every supported input mesh (`.obj`, `.ply`, `.stl`, or `.off`), it writes a
 mesh OBJ, one per-vertex signal array, one label JSON, and a spherical
 parametrization (FLASH by default, or CEM).
 
-Both parametrization methods require a single closed genus-0 surface. The
+The importer and benchmark generator also support `--param-method spheremap`,
+which delegates spherical mapping to the compiled `SphereMap` backend from the
+`MoebiusRegistration` repository. The wrapper preserves vertex order and face
+connectivity, stores the exact command and solver settings in the spherical
+sidecar, and retains an output sphere for inspection when geometric validation
+reports collapsed or folded triangles. Its defaults match
+`MoebiusRegistration/scripts/example.py`; use the `--spheremap-*` options to
+override them.
+
+All parametrization methods require a single closed genus-0 surface. The
 importer always skips open, disconnected, and non-genus-0 meshes before any
 dataset artifacts are written; the final summary reports how many were
 filtered.
 
-CEM also supports opt-in conformal post-centering with `--mobius-center`. See
-[Möbius centering after CEM](MOBIUS_CENTERING.md) for the transform convention,
+CEM and SphereMap support opt-in conformal post-centering with
+`--mobius-center`. See [Möbius centering after CEM](MOBIUS_CENTERING.md) for
+the transform convention,
 metadata schema, resume behavior, and `pmconv` integration.
 
 CEM uses the paper's experimental stereographic partition radius `1.2` by
@@ -185,6 +195,51 @@ best sphere and spherical JSON for diagnosis, but the primary label records
 Imports resume by default: only samples with complete mesh, signal, label, and
 required sphere artifacts are skipped. Use `--no-resume` to regenerate every
 selected input and overwrite its artifacts.
+
+### Dataset-wide spherical error plots
+
+To analyze an existing backend output root, use
+`examples/plot_dataset_spherical_errors.py`. The root should contain matching
+`meshes/` and `spheres/` directories; files are paired by stem:
+
+```bash
+python examples/plot_dataset_spherical_errors.py \
+  --root data/faust_flash \
+  --backend flash \
+  --output-root data/faust_flash/error_analysis
+```
+
+The command writes `metrics.json`, `metrics.csv`, `summary_report.md`, and
+colored sphere and original-mesh plots per sample (`<sample>_sphere.png` and
+`<sample>_mesh.png`). Plot colors identify actual-zero, near-zero, folded, and
+ordinary triangles. Run it separately with `--backend cem` or
+`--backend cmcf` for the corresponding dataset roots.
+
+To smooth a whole registration directory before parametrization, use the
+batch wrapper around the quality-aware sliver smoother:
+
+```bash
+python examples/smooth_registration_dataset.py \
+  --input-dir /path/to/registrations \
+  --output-dir /path/to/registrations_smoothed \
+  --method quality \
+  --iterations 10 \
+  --angle-threshold 10
+```
+
+Relative filenames and mesh connectivity are preserved. The default `quality`
+method is the existing sliver-aware tangential smoother. Use
+`--method laplacian` for synchronous uniform neighbor-average smoothing; this
+intentionally permits normal displacement. The output directory also receives
+`smoothing_metrics.json` and `smoothing_metrics.csv`.
+
+Add `--plot` to write a side-by-side original/smoothed PNG next to each
+output mesh.
+
+For Laplacian mode, `--laplacian-iterations`/`--iterations` controls the
+number of synchronous passes, `--laplacian-step`/`--step` controls the move
+fraction, and `--laplacian-rings` controls the stencil size (`1` is the usual
+one-ring Laplacian, `2` includes two-hop neighbors).
 
 Generic meshes receive an all-zero `float32` signal with one value per vertex:
 
@@ -248,6 +303,31 @@ Count the generated ModelNet40 class distribution:
 ```bash
 python examples/count_modelnet40_classes.py data/imported_modelnet40
 ```
+
+### ADNI clinical classification
+
+Use the ADNI mesh directory together with the local `participants.tsv` manifest.
+The importer maps `CN`/`SMC` to class 0 (`CN`), `EMCI`/`LMCI`/`MCI` to
+class 1 (`MCI`), and `AD` to class 2 (`AD`). The manifest is read locally;
+its contents are not copied into the generated dataset. Folds are stratified
+by participant, so no participant's sessions or hip sides can cross a split:
+
+```bash
+python examples/script_to_generate_dataset_from_files.py \
+    --input-dir /path/to/ADNI/fixmodels_mni \
+    --adni-participants /path/to/ADNI/participants.tsv \
+    --adni-session first \
+    --adni-hip both \
+    --param-method cem \
+    --anchor-strategy central_regular \
+    --output-root data/imported_adni_cls
+```
+
+Use `--adni-session none` to retain every session, or `last` for the latest
+numeric session per participant. `--adni-hip left` and `right` select one side.
+The generated labels contain an `adni_cls` task with the integer label,
+participant ID, diagnosis, session, and hip metadata; folds are written under
+`folds/fold*/adni_cls/`.
 
 ## MNIST
 
@@ -659,7 +739,7 @@ Fields vary by case, typically including:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `method` | `str \| null` | `flash`, `cem`, or `null` when not run. |
+| `method` | `str \| null` | `flash`, `cem`, `spheremap`, or `null` when not run. |
 | `success` | `bool` | Whether spherical parametrization succeeded. |
 | `error` | `str \| null` | Error text if parametrization failed. |
 | `cem_radius` | `float \| null` | Requested base CEM radius. |

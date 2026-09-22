@@ -17,6 +17,7 @@ from spherepar.flash_parametrization import (  # noqa: F401
     flash_map_with_diagnostics,
     load_mesh_with_trimesh,
 )
+from spherepar.spheremap_parametrization import spheremap_map_with_diagnostics
 from spherepar.mesh import MeshFactory
 from spherepar.mobius_centering import center_spherical_mesh
 from spherepar.parametrization_validation import (
@@ -229,6 +230,21 @@ def compute_spherical_parametrization(
     reject_retry: bool = False,
     cem_max_attempts: int = 5,
     cem_max_collapsed_faces: int = 0,
+    spheremap_binary: Optional[str] = None,
+    spheremap_repository: Optional[str] = None,
+    spheremap_auto_build: bool = False,
+    spheremap_iters: int = 25,
+    spheremap_step_size: float = 1.0,
+    spheremap_threads: int = 4,
+    spheremap_no_center: bool = False,
+    spheremap_degree: Optional[int] = 4,
+    spheremap_a_steps: Optional[int] = 10,
+    spheremap_a_step_size: Optional[float] = 0.05,
+    spheremap_poincare_max_norm: Optional[float] = 2.0,
+    spheremap_c2i: Optional[int] = 0,
+    spheremap_gss_tolerance: Optional[float] = 1e-6,
+    spheremap_lump: bool = False,
+    spheremap_verbose: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Compute spherical parametrization of a mesh.
     
@@ -239,7 +255,7 @@ def compute_spherical_parametrization(
     faces : np.ndarray
         Face indices (M, 3).
     method : str
-        Parametrization method: 'flash' or 'cem'.
+        Parametrization method: 'flash', 'cem', or 'spheremap'.
     cem_eps : float
         CEM convergence tolerance.
     cem_max_iters : int
@@ -251,7 +267,7 @@ def compute_spherical_parametrization(
     verify : bool
         If True, validate topology and normal orientation after parametrization.
     mobius_center : bool
-        If True, apply area-weighted Möbius centering after CEM.
+        If True, apply area-weighted Möbius centering after CEM or SphereMap.
     cem_input_diagnostics_callback : callable, optional
         Receives CEM input-quality diagnostics immediately before Algorithm 4.1.
     anchor_diagnostics : bool
@@ -275,8 +291,8 @@ def compute_spherical_parametrization(
     vertices = np.asarray(vertices, dtype=np.float64)
     faces = np.asarray(faces, dtype=np.int32)
 
-    if mobius_center and method != "cem":
-        raise ValueError("mobius_center is supported only with method='cem'")
+    if mobius_center and method not in ("cem", "spheremap"):
+        raise ValueError("mobius_center is supported only with method='cem' or 'spheremap'")
     if anchor_diagnostics and method != "cem":
         raise ValueError("anchor_diagnostics is supported only with method='cem'")
     if (use_idt_remesh or adaptive_radius or reject_retry) and method != "cem":
@@ -289,6 +305,46 @@ def compute_spherical_parametrization(
             "method": "flash",
             "flash_diagnostics": flash_diagnostics,
             "success": bool(flash_diagnostics.get("success", False)),
+        }
+    elif method == "spheremap":
+        sphere_vertices, spheremap_diagnostics = spheremap_map_with_diagnostics(
+            vertices,
+            faces,
+            binary=spheremap_binary,
+            repository=spheremap_repository,
+            auto_build=spheremap_auto_build,
+            iters=spheremap_iters,
+            step_size=spheremap_step_size,
+            threads=spheremap_threads,
+            no_center=spheremap_no_center,
+            degree=spheremap_degree,
+            a_steps=spheremap_a_steps,
+            a_step_size=spheremap_a_step_size,
+            poincare_max_norm=spheremap_poincare_max_norm,
+            c2i=spheremap_c2i,
+            gss_tolerance=spheremap_gss_tolerance,
+            lump=spheremap_lump,
+            verbose=spheremap_verbose,
+        )
+        meta = {
+            "method": "spheremap",
+            "spheremap_diagnostics": spheremap_diagnostics,
+            "spheremap_binary": spheremap_binary,
+            "spheremap_repository": spheremap_repository,
+            "spheremap_auto_build": bool(spheremap_auto_build),
+            "spheremap_iters": int(spheremap_iters),
+            "spheremap_step_size": float(spheremap_step_size),
+            "spheremap_threads": int(spheremap_threads),
+            "spheremap_no_center": bool(spheremap_no_center),
+            "spheremap_degree": spheremap_degree,
+            "spheremap_a_steps": spheremap_a_steps,
+            "spheremap_a_step_size": spheremap_a_step_size,
+            "spheremap_poincare_max_norm": spheremap_poincare_max_norm,
+            "spheremap_c2i": spheremap_c2i,
+            "spheremap_gss_tolerance": spheremap_gss_tolerance,
+            "spheremap_lump": bool(spheremap_lump),
+            "spheremap_verbose": bool(spheremap_verbose),
+            "success": bool(spheremap_diagnostics.get("success", False)),
         }
     elif method == "cem":
         original_mesh = MeshFactory.make_mesh("surf", vertices, faces)
@@ -374,19 +430,20 @@ def compute_spherical_parametrization(
             ),
             "mobius_center": bool(mobius_center),
         }
-        if mobius_center:
-            sphere_vertices, centering_meta = center_spherical_mesh(
-                vertices_orig, faces_orig, sphere_vertices
-            )
-            meta["mobius_centering"] = centering_meta
-            print(
-                "Möbius centering: "
-                f"centroid {centering_meta['before']['centroid_norm']:.3e} -> "
-                f"{centering_meta['after']['centroid_norm']:.3e} "
-                f"({centering_meta['iterations']} iteration(s))"
-            )
     else:
-        raise ValueError("method must be one of: 'flash', 'cem'")
+        raise ValueError("method must be one of: 'flash', 'cem', 'spheremap'")
+
+    if mobius_center:
+        sphere_vertices, centering_meta = center_spherical_mesh(
+            vertices_orig, faces_orig, sphere_vertices
+        )
+        meta["mobius_centering"] = centering_meta
+        print(
+            "Möbius centering: "
+            f"centroid {centering_meta['before']['centroid_norm']:.3e} -> "
+            f"{centering_meta['after']['centroid_norm']:.3e} "
+            f"({centering_meta['iterations']} iteration(s))"
+        )
 
     meta["mobius_center"] = bool(mobius_center)
 
@@ -418,15 +475,24 @@ def compute_spherical_parametrization(
         meta["sphere_validation"] = validate_sphere_parameterization(
             vertices_orig, faces_orig, sphere_vertices, faces
         )
-        if method == "flash":
+        if method in ("flash", "spheremap"):
             validation = meta["sphere_validation"]
             if not validation.get("is_valid", False):
                 meta["success"] = False
-                meta["error"] = "FLASH sphere validation failed: " + "; ".join(validation.get("errors", []))
+                label = "FLASH" if method == "flash" else "SphereMap"
+                meta["error"] = label + " sphere validation failed: " + "; ".join(validation.get("errors", []))
             elif not meta.get("success", False):
-                meta["error"] = meta.get("flash_diagnostics", {}).get("error") or "FLASH solver did not produce a validated map"
+                diagnostics = (
+                    meta.get("flash_diagnostics", {})
+                    if method == "flash" else meta.get("spheremap_diagnostics", {})
+                )
+                meta["error"] = diagnostics.get("error") or f"{method} solver did not produce a validated map"
 
-    if method == "flash" and not meta.get("success", False) and "error" not in meta:
-        meta["error"] = meta.get("flash_diagnostics", {}).get("error") or "FLASH solver did not produce a validated map"
+    if method in ("flash", "spheremap") and not meta.get("success", False) and "error" not in meta:
+        diagnostics = (
+            meta.get("flash_diagnostics", {})
+            if method == "flash" else meta.get("spheremap_diagnostics", {})
+        )
+        meta["error"] = diagnostics.get("error") or f"{method} solver did not produce a validated map"
 
     return sphere_vertices, meta

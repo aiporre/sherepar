@@ -114,6 +114,15 @@ def validate_sphere_parameterization(
             "min_twice_area": min_twice_area,
             "median_twice_area": median_twice_area,
             "area_threshold": float(area_threshold),
+            # Names mirror MoebiusRegistration's cmcf_metrics.measure output
+            # without making that external script a runtime dependency.
+            "collapse_threshold": float(area_threshold),
+            "collapsed_count": degenerate_count,
+            "collapsed_frac": (
+                float(degenerate_count) / float(len(mesh_faces))
+                if len(mesh_faces) else 0.0
+            ),
+            "min_area": 0.5 * min_twice_area,
             "degenerate_face_count": degenerate_count,
         })
         if median_twice_area <= 0.0 or degenerate_count:
