@@ -69,6 +69,8 @@ from typing import Any, Callable, Optional, Sequence
 import warnings
 
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import spsolve
 
 from spherepar.mesh import MeshSurf, StretchFunction, Vector, Vertex
 from spherepar.cem_anchor_diagnostics import (
@@ -83,6 +85,16 @@ from spherepar.parametrization_validation import validate_sphere_parameterizatio
 _EPS_PROJ = 1e-12   # minimum |1 - z| in stereographic projection (north-pole guard)
 _EPS_INV  = 1e-14   # minimum |h|^2 in Mobius inversion step (zero-division guard)
 _ANCHOR_STRATEGIES = ("regular", "central_regular")
+
+
+def _solve_dirichlet_system(matrix: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    """Solve a reduced cotangent system without densifying its factorization.
+
+    The CEM equations are unchanged; converting the already-assembled dense
+    slice to CSR only avoids the cubic dense factorization cost on FAUST-size
+    meshes.
+    """
+    return np.asarray(spsolve(csr_matrix(matrix), rhs))
 
 
 def _validate_anchor_options(
@@ -481,7 +493,7 @@ def dirichlet_parametrization(
         f"rhs shape wrong: {rhs.shape}; expected ({len(I)},)"
     )
 
-    h_I = np.linalg.solve(A_coeff, rhs)
+    h_I = _solve_dirichlet_system(A_coeff, rhs)
 
     # [A4.1-5] no NaN/Inf
     assert np.all(np.isfinite(h_I)), "NaN/Inf detected in h_I after the linear solve"
@@ -727,7 +739,7 @@ def _stretch_parametrization_attempt(mesh: MeshSurf,
         A_coeff = Ld[np.ix_(I, I)]
         h_b     = h_candidate[B]
         b_coeff = -Ld[np.ix_(I, B)] @ h_b
-        h_I     = np.linalg.solve(A_coeff, b_coeff)
+        h_I     = _solve_dirichlet_system(A_coeff, b_coeff)
 
         # [A4.2-4] NaN/Inf check
         assert np.all(np.isfinite(h_I)), (
