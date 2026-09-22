@@ -36,11 +36,13 @@ from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.splits import (
     build_task_splits,
     TASK_MODELNET40_CLS,
+    TASK_ADNI_CLS,
     is_valid_for_number_of_centers,
     is_valid_for_center_regression,
     is_valid_for_sigma_regression,
     is_valid_for_amplitude_regression,
     is_valid_for_mnist_cls,
+    is_valid_for_adni_cls,
 )
 
 __all__ = [
@@ -66,9 +68,11 @@ __all__ = [
     "generate_dataset",
     "build_task_splits",
     "TASK_MODELNET40_CLS",
+    "TASK_ADNI_CLS",
     "is_valid_for_number_of_centers",
     "is_valid_for_center_regression",
     "is_valid_for_sigma_regression",
     "is_valid_for_amplitude_regression",
     "is_valid_for_mnist_cls",
+    "is_valid_for_adni_cls",
 ]

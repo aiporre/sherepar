@@ -14,6 +14,7 @@ TASK_SIGMA_REGRESSION = "sigma_regression"
 TASK_AMPLITUDE_REGRESSION = "amplitude_regression"
 TASK_MNIST_CLS = "mnist_cls"
 TASK_MODELNET40_CLS = "modelnet40_cls"
+TASK_ADNI_CLS = "adni_cls"
 
 DEFAULT_TASKS = [
     TASK_NUMBER_OF_CENTERS,
@@ -55,6 +56,15 @@ def is_valid_for_modelnet40_cls(label: Dict[str, Any]) -> bool:
     return isinstance(task_entry.get("label"), int)
 
 
+def is_valid_for_adni_cls(label: Dict[str, Any]) -> bool:
+    task_entry = label.get("tasks", {}).get(TASK_ADNI_CLS, {})
+    if not isinstance(task_entry, dict) or task_entry.get("valid") is not True:
+        return False
+    participant_id = task_entry.get("participant_id")
+    class_id = task_entry.get("label")
+    return isinstance(participant_id, str) and bool(participant_id) and isinstance(class_id, int) and class_id in (0, 1, 2)
+
+
 TASK_FILTERS = {
     TASK_NUMBER_OF_CENTERS: is_valid_for_number_of_centers,
     TASK_CENTER_REGRESSION: is_valid_for_center_regression,
@@ -62,6 +72,7 @@ TASK_FILTERS = {
     TASK_AMPLITUDE_REGRESSION: is_valid_for_amplitude_regression,
     TASK_MNIST_CLS: is_valid_for_mnist_cls,
     TASK_MODELNET40_CLS: is_valid_for_modelnet40_cls,
+    TASK_ADNI_CLS: is_valid_for_adni_cls,
 }
 
 
@@ -197,6 +208,76 @@ def _modelnet40_native_split(records: Sequence[Dict[str, Any]]) -> Tuple[List[st
     return train_ids, [], test_ids
 
 
+def _adni_grouped_split(
+    records: Sequence[Dict[str, Any]],
+    num_folds: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> List[Tuple[List[str], List[str], List[str]]]:
+    """Participant-stratified splits for ADNI clinical classification.
+
+    Every participant is assigned to exactly one partition in each fold; all
+    sessions and hip sides therefore remain together. Classes are sampled
+    independently so each partition is approximately class balanced.
+    """
+    if train_ratio <= 0 or test_ratio <= 0 or val_ratio < 0:
+        raise ValueError("train_ratio and test_ratio must be positive; val_ratio must be non-negative")
+    if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
+        raise ValueError("train_ratio + val_ratio + test_ratio must equal 1.0")
+    by_participant: Dict[str, List[Dict[str, Any]]] = {}
+    class_by_participant: Dict[str, int] = {}
+    for rec in records:
+        task_entry = rec.get("tasks", {}).get(TASK_ADNI_CLS, {})
+        participant = str(task_entry.get("participant_id", ""))
+        if not participant:
+            raise ValueError(f"ADNI record {rec.get('sample_id')} is missing participant_id")
+        class_id = int(task_entry["label"])
+        prior = class_by_participant.setdefault(participant, class_id)
+        if prior != class_id:
+            raise ValueError(f"Participant {participant} has inconsistent ADNI class labels")
+        by_participant.setdefault(participant, []).append(rec)
+
+    by_class: Dict[int, List[str]] = {0: [], 1: [], 2: []}
+    for participant, class_id in class_by_participant.items():
+        by_class.setdefault(class_id, []).append(participant)
+    rng = np.random.default_rng(seed)
+    shuffled: Dict[int, List[str]] = {
+        class_id: [by_class[class_id][int(i)] for i in rng.permutation(len(by_class[class_id]))]
+        for class_id in sorted(by_class)
+    }
+
+    folds: List[Tuple[List[str], List[str], List[str]]] = []
+    for fold_idx in range(num_folds):
+        train_participants: List[str] = []
+        val_participants: List[str] = []
+        test_participants: List[str] = []
+        for class_id in sorted(shuffled):
+            participants = shuffled[class_id]
+            n = len(participants)
+            if n == 0:
+                continue
+            n_test = max(1, int(round(n * test_ratio))) if n > 1 else 0
+            n_val = max(1, int(round(n * val_ratio))) if val_ratio > 0 and n > 2 else 0
+            while n_test + n_val >= n and n > 1:
+                if n_val > 0:
+                    n_val -= 1
+                else:
+                    n_test -= 1
+            offset = (fold_idx * max(n_test, 1)) % n
+            rotated = participants[offset:] + participants[:offset]
+            test_participants.extend(rotated[:n_test])
+            val_participants.extend(rotated[n_test : n_test + n_val])
+            train_participants.extend(rotated[n_test + n_val :])
+
+        def sample_ids(participants: Sequence[str]) -> List[str]:
+            return sorted(str(rec["sample_id"]) for participant in participants for rec in by_participant[participant])
+
+        folds.append((sample_ids(train_participants), sample_ids(val_participants), sample_ids(test_participants)))
+    return folds
+
+
 def build_task_splits(
     dataset_root: str,
     tasks: Iterable[str] | None = None,
@@ -243,6 +324,15 @@ def build_task_splits(
         elif task_name == TASK_MODELNET40_CLS and modelnet40_native_split:
             train_ids, val_ids, test_ids = _modelnet40_native_split(valid)
             folds = [(train_ids, val_ids, test_ids) for _ in range(num_folds)]
+        elif task_name == TASK_ADNI_CLS:
+            folds = _adni_grouped_split(
+                records=valid,
+                num_folds=num_folds,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+                seed=seed,
+            )
         else:
             folds = _grouped_split(
                 records=valid,
@@ -253,7 +343,6 @@ def build_task_splits(
                 seed=seed,
                 group_by_template=group_by_template,
             )
-
         task_summary = {
             "num_valid_samples": len(valid),
             "folds": [],
@@ -268,6 +357,21 @@ def build_task_splits(
             task_summary["split_source"] = "mnist_default"
         if task_name == TASK_MODELNET40_CLS and modelnet40_native_split:
             task_summary["split_source"] = "modelnet40_native"
+        if task_name == TASK_ADNI_CLS:
+            task_summary["split_source"] = "participant_stratified"
+            task_summary["class_counts"] = {
+                str(class_id): sum(1 for rec in valid if rec["tasks"][TASK_ADNI_CLS]["label"] == class_id)
+                for class_id in (0, 1, 2)
+            }
+            participant_classes = {
+                rec["tasks"][TASK_ADNI_CLS]["participant_id"]: rec["tasks"][TASK_ADNI_CLS]["label"]
+                for rec in valid
+            }
+            task_summary["participant_counts"] = len(participant_classes)
+            task_summary["class_participant_counts"] = {
+                str(class_id): sum(1 for value in participant_classes.values() if value == class_id)
+                for class_id in (0, 1, 2)
+            }
 
         for fold_idx, (train_ids, val_ids, test_ids) in enumerate(folds, start=1):
             task_dir = folds_dir / f"fold{fold_idx}" / task_name

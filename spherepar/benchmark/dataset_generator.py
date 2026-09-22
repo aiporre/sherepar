@@ -816,6 +816,21 @@ def parametrization_request_matches(
     reject_retry: bool = False,
     cem_max_attempts: int = 5,
     cem_max_collapsed_faces: int = 0,
+    spheremap_binary: Optional[str] = None,
+    spheremap_repository: Optional[str] = None,
+    spheremap_auto_build: bool = False,
+    spheremap_iters: int = 25,
+    spheremap_step_size: float = 1.0,
+    spheremap_threads: int = 4,
+    spheremap_no_center: bool = False,
+    spheremap_degree: Optional[int] = 4,
+    spheremap_a_steps: Optional[int] = 10,
+    spheremap_a_step_size: Optional[float] = 0.05,
+    spheremap_poincare_max_norm: Optional[float] = 2.0,
+    spheremap_c2i: Optional[int] = 0,
+    spheremap_gss_tolerance: Optional[float] = 1e-6,
+    spheremap_lump: bool = False,
+    spheremap_verbose: bool = False,
 ) -> bool:
     """Return whether a completed label matches the requested sphere settings."""
     parametrization = label.get("parametrization", {})
@@ -875,6 +890,34 @@ def parametrization_request_matches(
         except (TypeError, ValueError):
             return False
         return bool(np.isclose(stored_radius, cem_radius, rtol=0.0, atol=1e-12))
+    if method == "spheremap":
+        expected = {
+            "spheremap_binary": spheremap_binary,
+            "spheremap_repository": spheremap_repository,
+            "spheremap_auto_build": bool(spheremap_auto_build),
+            "spheremap_iters": int(spheremap_iters),
+            "spheremap_step_size": float(spheremap_step_size),
+            "spheremap_threads": int(spheremap_threads),
+            "spheremap_no_center": bool(spheremap_no_center),
+            "spheremap_degree": spheremap_degree,
+            "spheremap_a_steps": spheremap_a_steps,
+            "spheremap_a_step_size": spheremap_a_step_size,
+            "spheremap_poincare_max_norm": spheremap_poincare_max_norm,
+            "spheremap_c2i": spheremap_c2i,
+            "spheremap_gss_tolerance": spheremap_gss_tolerance,
+            "spheremap_lump": bool(spheremap_lump),
+            "spheremap_verbose": bool(spheremap_verbose),
+        }
+        for key, value in expected.items():
+            stored = parametrization.get(key)
+            if isinstance(value, float):
+                try:
+                    if not np.isclose(float(stored), value, rtol=0.0, atol=1e-12):
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            elif stored != value:
+                return False
     return True
 
 
@@ -1543,6 +1586,21 @@ def save_spherical_parametrization(
         reject_retry: bool = False,
         cem_max_attempts: int = 5,
         cem_max_collapsed_faces: int = 0,
+        spheremap_binary: Optional[str] = None,
+        spheremap_repository: Optional[str] = None,
+        spheremap_auto_build: bool = False,
+        spheremap_iters: int = 25,
+        spheremap_step_size: float = 1.0,
+        spheremap_threads: int = 4,
+        spheremap_no_center: bool = False,
+        spheremap_degree: Optional[int] = 4,
+        spheremap_a_steps: Optional[int] = 10,
+        spheremap_a_step_size: Optional[float] = 0.05,
+        spheremap_poincare_max_norm: Optional[float] = 2.0,
+        spheremap_c2i: Optional[int] = 0,
+        spheremap_gss_tolerance: Optional[float] = 1e-6,
+        spheremap_lump: bool = False,
+        spheremap_verbose: bool = False,
 ) -> Dict[str, Any]:
     """Compute, validate, and save a spherical map and its metadata.
 
@@ -1583,6 +1641,21 @@ def save_spherical_parametrization(
         reject_retry=reject_retry,
         cem_max_attempts=cem_max_attempts,
         cem_max_collapsed_faces=cem_max_collapsed_faces,
+        spheremap_binary=spheremap_binary,
+        spheremap_repository=spheremap_repository,
+        spheremap_auto_build=spheremap_auto_build,
+        spheremap_iters=spheremap_iters,
+        spheremap_step_size=spheremap_step_size,
+        spheremap_threads=spheremap_threads,
+        spheremap_no_center=spheremap_no_center,
+        spheremap_degree=spheremap_degree,
+        spheremap_a_steps=spheremap_a_steps,
+        spheremap_a_step_size=spheremap_a_step_size,
+        spheremap_poincare_max_norm=spheremap_poincare_max_norm,
+        spheremap_c2i=spheremap_c2i,
+        spheremap_gss_tolerance=spheremap_gss_tolerance,
+        spheremap_lump=spheremap_lump,
+        spheremap_verbose=spheremap_verbose,
         cem_input_diagnostics_callback=(
             log_cem_input_diagnostics if method == "cem" else None
         ),
@@ -1680,14 +1753,17 @@ def save_spherical_parametrization(
         )
 
     acceptance = sphere_meta.get("acceptance", {})
-    flash_failed = bool(method == "flash" and sphere_meta.get("success") is False)
-    rejected = bool(flash_failed or (reject_retry and not acceptance.get("accepted", False)))
+    backend_failed = bool(
+        method in ("flash", "spheremap") and sphere_meta.get("success") is False
+    )
+    rejected = bool(backend_failed or (reject_retry and not acceptance.get("accepted", False)))
     rejection_error = None
-    if flash_failed:
+    if backend_failed:
         rejection_error = str(
             sphere_meta.get("error")
             or sphere_meta.get("flash_diagnostics", {}).get("error")
-            or "FLASH parametrization failed validation"
+            or sphere_meta.get("spheremap_diagnostics", {}).get("error")
+            or f"{method} parametrization failed validation"
         )
     elif rejected:
         rejection_error = "CEM parametrization rejected: " + str(acceptance.get("reason"))
@@ -2124,6 +2200,21 @@ def generate_dataset(
         cem_max_iters: int = 100,
         cem_verbose: bool = False,
         cem_radius: float = 1.2,
+        spheremap_binary: Optional[str] = None,
+        spheremap_repository: Optional[str] = None,
+        spheremap_auto_build: bool = False,
+        spheremap_iters: int = 25,
+        spheremap_step_size: float = 1.0,
+        spheremap_threads: int = 4,
+        spheremap_no_center: bool = False,
+        spheremap_degree: Optional[int] = 4,
+        spheremap_a_steps: Optional[int] = 10,
+        spheremap_a_step_size: Optional[float] = 0.05,
+        spheremap_poincare_max_norm: Optional[float] = 2.0,
+        spheremap_c2i: Optional[int] = 0,
+        spheremap_gss_tolerance: Optional[float] = 1e-6,
+        spheremap_lump: bool = False,
+        spheremap_verbose: bool = False,
         deformation_cases: Optional[List[str]] = None,
         create_splits: bool = False,
         split_tasks: Optional[List[str]] = None,
@@ -2197,10 +2288,10 @@ def generate_dataset(
     if signal_type is None:
         raise ValueError("signal_type cannot be None for this dataset pipeline; each sample must include a signal.")
     fixed_signal_center = _normalize_signal_center(signal_center)
-    if param_method not in (None, "flash", "cem"):
-        raise ValueError("param_method must be one of None, 'flash', or 'cem'")
-    if mobius_center and param_method != "cem":
-        raise ValueError("mobius_center requires param_method='cem'")
+    if param_method not in (None, "flash", "cem", "spheremap"):
+        raise ValueError("param_method must be one of None, 'flash', 'cem', or 'spheremap'")
+    if mobius_center and param_method not in ("cem", "spheremap"):
+        raise ValueError("mobius_center requires param_method='cem' or 'spheremap'")
     if anchor_diagnostics and param_method != "cem":
         raise ValueError("anchor_diagnostics requires param_method='cem'")
     if anchor_strategy not in ("regular", "central_regular"):
@@ -2215,6 +2306,10 @@ def generate_dataset(
         raise ValueError("cem_max_attempts must be at least 1")
     if cem_max_collapsed_faces < 0:
         raise ValueError("cem_max_collapsed_faces must be non-negative")
+    if spheremap_iters < 1 or spheremap_threads < 1:
+        raise ValueError("spheremap_iters and spheremap_threads must be positive")
+    if not np.isfinite(spheremap_step_size) or spheremap_step_size <= 0.0:
+        raise ValueError("spheremap_step_size must be finite and positive")
     cem_radius_candidates = tuple(float(value) for value in cem_radius_candidates)
     if any(not np.isfinite(value) or value <= 0.0 for value in cem_radius_candidates):
         raise ValueError("cem_radius_candidates must be finite and positive")
@@ -2309,6 +2404,21 @@ def generate_dataset(
             reject_retry,
             cem_max_attempts,
             cem_max_collapsed_faces,
+            spheremap_binary,
+            spheremap_repository,
+            spheremap_auto_build,
+            spheremap_iters,
+            spheremap_step_size,
+            spheremap_threads,
+            spheremap_no_center,
+            spheremap_degree,
+            spheremap_a_steps,
+            spheremap_a_step_size,
+            spheremap_poincare_max_norm,
+            spheremap_c2i,
+            spheremap_gss_tolerance,
+            spheremap_lump,
+            spheremap_verbose,
         )
     ]
     # Skip the already-completed slots in this invocation.  The counter itself
@@ -2376,6 +2486,21 @@ def generate_dataset(
             "cem_max_iters": cem_max_iters,
             "cem_verbose": cem_verbose,
             "cem_radius": cem_radius,
+            "spheremap_binary": spheremap_binary,
+            "spheremap_repository": spheremap_repository,
+            "spheremap_auto_build": spheremap_auto_build,
+            "spheremap_iters": spheremap_iters,
+            "spheremap_step_size": spheremap_step_size,
+            "spheremap_threads": spheremap_threads,
+            "spheremap_no_center": spheremap_no_center,
+            "spheremap_degree": spheremap_degree,
+            "spheremap_a_steps": spheremap_a_steps,
+            "spheremap_a_step_size": spheremap_a_step_size,
+            "spheremap_poincare_max_norm": spheremap_poincare_max_norm,
+            "spheremap_c2i": spheremap_c2i,
+            "spheremap_gss_tolerance": spheremap_gss_tolerance,
+            "spheremap_lump": spheremap_lump,
+            "spheremap_verbose": spheremap_verbose,
             "mobius_center": mobius_center,
             "anchor_diagnostics": anchor_diagnostics,
             "anchor_strategy": anchor_strategy,
@@ -3305,6 +3430,21 @@ def generate_dataset(
                                 cem_max_iters=cem_max_iters,
                                 cem_verbose=cem_verbose,
                                 cem_radius=cem_radius,
+                                spheremap_binary=spheremap_binary,
+                                spheremap_repository=spheremap_repository,
+                                spheremap_auto_build=spheremap_auto_build,
+                                spheremap_iters=spheremap_iters,
+                                spheremap_step_size=spheremap_step_size,
+                                spheremap_threads=spheremap_threads,
+                                spheremap_no_center=spheremap_no_center,
+                                spheremap_degree=spheremap_degree,
+                                spheremap_a_steps=spheremap_a_steps,
+                                spheremap_a_step_size=spheremap_a_step_size,
+                                spheremap_poincare_max_norm=spheremap_poincare_max_norm,
+                                spheremap_c2i=spheremap_c2i,
+                                spheremap_gss_tolerance=spheremap_gss_tolerance,
+                                spheremap_lump=spheremap_lump,
+                                spheremap_verbose=spheremap_verbose,
                                 mobius_center=mobius_center,
                                 anchor_diagnostics=anchor_diagnostics,
                                 anchor_strategy=anchor_strategy,
@@ -3337,6 +3477,21 @@ def generate_dataset(
                         "parametrization": {
                             "method": effective_param_method,
                             "cem_radius": float(cem_radius) if effective_param_method == "cem" else None,
+                            "spheremap_binary": spheremap_binary if effective_param_method == "spheremap" else None,
+                            "spheremap_repository": spheremap_repository if effective_param_method == "spheremap" else None,
+                            "spheremap_auto_build": bool(spheremap_auto_build) if effective_param_method == "spheremap" else False,
+                            "spheremap_iters": int(spheremap_iters) if effective_param_method == "spheremap" else None,
+                            "spheremap_step_size": float(spheremap_step_size) if effective_param_method == "spheremap" else None,
+                            "spheremap_threads": int(spheremap_threads) if effective_param_method == "spheremap" else None,
+                            "spheremap_no_center": bool(spheremap_no_center) if effective_param_method == "spheremap" else False,
+                            "spheremap_degree": spheremap_degree if effective_param_method == "spheremap" else None,
+                            "spheremap_a_steps": spheremap_a_steps if effective_param_method == "spheremap" else None,
+                            "spheremap_a_step_size": spheremap_a_step_size if effective_param_method == "spheremap" else None,
+                            "spheremap_poincare_max_norm": spheremap_poincare_max_norm if effective_param_method == "spheremap" else None,
+                            "spheremap_c2i": spheremap_c2i if effective_param_method == "spheremap" else None,
+                            "spheremap_gss_tolerance": spheremap_gss_tolerance if effective_param_method == "spheremap" else None,
+                            "spheremap_lump": bool(spheremap_lump) if effective_param_method == "spheremap" else False,
+                            "spheremap_verbose": bool(spheremap_verbose) if effective_param_method == "spheremap" else False,
                             "cem_selected_radius": paths.get("cem_selected_radius"),
                             "use_idt_remesh": bool(use_idt_remesh),
                             "adaptive_radius": bool(adaptive_radius),
@@ -3534,13 +3689,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--param-method",
-        choices=("flash", "cem", "none"),
+        choices=("flash", "cem", "spheremap", "none"),
         default="none",
         help="Spherical parametrization method saved under spheres/ and labels/*_spherical.json.",
     )
     parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence epsilon (if --param-method cem).")
     parser.add_argument("--cem-max-iters", type=int, default=100, help="CEM max iterations (if --param-method cem).")
     parser.add_argument("--cem-radius", type=float, default=1.2, help="CEM stereographic partition radius (if --param-method cem).")
+    parser.add_argument("--spheremap-binary", default=None, help="Path to the MoebiusRegistration SphereMap binary.")
+    parser.add_argument("--spheremap-repository", default=None, help="MoebiusRegistration repository path.")
+    parser.add_argument("--spheremap-auto-build", action="store_true", help="Build SphereMap if its binary is missing.")
+    parser.add_argument("--spheremap-iters", type=int, default=25, help="SphereMap CMCF iteration count.")
+    parser.add_argument("--spheremap-step-size", type=float, default=1.0, help="SphereMap CMCF step size.")
+    parser.add_argument("--spheremap-threads", type=int, default=4, help="SphereMap worker threads.")
+    parser.add_argument("--spheremap-no-center", action="store_true", help="Disable SphereMap Möbius centering.")
+    parser.add_argument("--spheremap-degree", type=int, default=4, help="Optional SphereMap centering degree.")
+    parser.add_argument("--spheremap-a-steps", type=int, default=10, help="SphereMap Möbius-centering line-search steps.")
+    parser.add_argument("--spheremap-a-step-size", type=float, default=0.05, help="SphereMap Möbius-centering step size.")
+    parser.add_argument("--spheremap-poincare-max-norm", type=float, default=2.0, help="SphereMap Poincare-map maximum norm.")
+    parser.add_argument("--spheremap-c2i", type=int, default=0, help="SphereMap C2I mode.")
+    parser.add_argument("--spheremap-gss-tolerance", type=float, default=1e-6, help="SphereMap golden-section tolerance.")
+    parser.add_argument("--spheremap-lump", action="store_true", help="Use lumped SphereMap mass matrix.")
+    parser.add_argument("--spheremap-verbose", action="store_true", help="Enable SphereMap verbose output.")
     parser.add_argument("--use-idt-remesh", action="store_true", help="Use fixed-vertex intrinsic-Delaunay connectivity for CEM.")
     parser.add_argument("--adaptive-radius", action="store_true", help="Retry collapsed CEM maps with candidate radii.")
     parser.add_argument(
@@ -3556,7 +3726,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mobius-center",
         action="store_true",
-        help="Apply area-weighted Möbius centering after CEM (requires --param-method cem).",
+        help="Apply area-weighted Möbius centering after CEM or SphereMap (requires --param-method cem or spheremap).",
     )
     parser.add_argument(
         "--anchor-diagnostics",
@@ -3657,6 +3827,21 @@ def main(argv: Optional[List[str]] = None) -> None:
         cem_max_iters=args.cem_max_iters,
         cem_verbose=args.cem_verbose,
         cem_radius=args.cem_radius,
+        spheremap_binary=args.spheremap_binary,
+        spheremap_repository=args.spheremap_repository,
+        spheremap_auto_build=args.spheremap_auto_build,
+        spheremap_iters=args.spheremap_iters,
+        spheremap_step_size=args.spheremap_step_size,
+        spheremap_threads=args.spheremap_threads,
+        spheremap_no_center=args.spheremap_no_center,
+        spheremap_degree=args.spheremap_degree,
+        spheremap_a_steps=args.spheremap_a_steps,
+        spheremap_a_step_size=args.spheremap_a_step_size,
+        spheremap_poincare_max_norm=args.spheremap_poincare_max_norm,
+        spheremap_c2i=args.spheremap_c2i,
+        spheremap_gss_tolerance=args.spheremap_gss_tolerance,
+        spheremap_lump=args.spheremap_lump,
+        spheremap_verbose=args.spheremap_verbose,
         mobius_center=args.mobius_center,
         anchor_diagnostics=args.anchor_diagnostics,
         anchor_strategy=args.anchor_strategy,

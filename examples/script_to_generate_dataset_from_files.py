@@ -17,6 +17,7 @@ For each input mesh:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
@@ -46,6 +47,11 @@ class MeshInput:
     source_split: Optional[str] = None
     class_name: Optional[str] = None
     class_id: Optional[int] = None
+    participant_id: Optional[str] = None
+    diagnosis_sc: Optional[str] = None
+    session: Optional[str] = None
+    session_number: Optional[int] = None
+    hip: Optional[str] = None
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -81,10 +87,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Dataset mode for --input-dir. Dedicated dataset-root options select their own mode.",
     )
     parser.add_argument(
+        "--adni-participants",
+        default=None,
+        help="ADNI participants.tsv manifest. Enables ADNI clinical classification labels and participant splits.",
+    )
+    parser.add_argument(
+        "--adni-session",
+        choices=("none", "first", "last"),
+        default="none",
+        help="ADNI session selection per participant (all, earliest, or latest numeric session).",
+    )
+    parser.add_argument(
+        "--adni-hip",
+        choices=("both", "left", "right"),
+        default="both",
+        help="ADNI hip side filter.",
+    )
+    parser.add_argument(
         "--param-method",
-        choices=["flash", "cem"],
+        choices=["flash", "cem", "spheremap"],
         default="flash",
-        help="Spherical parametrization method.",
+        help="Spherical parametrization method (SphereMap uses MoebiusRegistration).",
     )
     parser.add_argument("--cem-eps", type=float, default=1e-6, help="CEM convergence tolerance.")
     parser.add_argument("--cem-max-iters", type=int, default=100, help="Maximum CEM iterations.")
@@ -101,10 +124,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cem-max-attempts", type=int, default=5, help="Maximum total CEM radius attempts.")
     parser.add_argument("--cem-max-collapsed-faces", type=int, default=0, help="Accepted collapsed-face limit.")
     parser.add_argument("--cem-verbose", action="store_true", help="Verbose CEM output.")
+    parser.add_argument("--spheremap-binary", default=None, help="Path to the MoebiusRegistration SphereMap binary.")
+    parser.add_argument("--spheremap-repository", default=None, help="MoebiusRegistration repository containing spheremap/ and Bin/Linux/SphereMap.")
+    parser.add_argument("--spheremap-auto-build", action="store_true", help="Build SphereMap if the binary is missing.")
+    parser.add_argument("--spheremap-iters", type=int, default=25, help="SphereMap CMCF iteration count.")
+    parser.add_argument("--spheremap-step-size", type=float, default=1.0, help="SphereMap CMCF step size.")
+    parser.add_argument("--spheremap-threads", type=int, default=4, help="SphereMap worker threads.")
+    parser.add_argument("--spheremap-no-center", action="store_true", help="Disable SphereMap's built-in Möbius centering.")
+    parser.add_argument("--spheremap-degree", type=int, default=4, help="Optional SphereMap spherical-harmonic centering degree.")
+    parser.add_argument("--spheremap-a-steps", type=int, default=10, help="SphereMap Möbius-centering line-search steps.")
+    parser.add_argument("--spheremap-a-step-size", type=float, default=0.05, help="SphereMap Möbius-centering step size.")
+    parser.add_argument("--spheremap-poincare-max-norm", type=float, default=2.0, help="SphereMap Poincare-map maximum norm.")
+    parser.add_argument("--spheremap-c2i", type=int, default=0, help="SphereMap C2I mode.")
+    parser.add_argument("--spheremap-gss-tolerance", type=float, default=1e-6, help="SphereMap golden-section tolerance.")
+    parser.add_argument("--spheremap-lump", action="store_true", help="Use lumped SphereMap mass matrix.")
+    parser.add_argument("--spheremap-verbose", action="store_true", help="Enable SphereMap verbose output.")
     parser.add_argument(
         "--mobius-center",
         action="store_true",
-        help="Apply area-weighted Möbius centering after CEM (requires --param-method cem).",
+        help="Apply area-weighted Möbius centering after CEM or SphereMap (requires --param-method cem or spheremap).",
     )
     parser.add_argument(
         "--anchor-diagnostics",
@@ -134,6 +172,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-ratio", type=float, default=0.15, help="Validation ratio for generated splits.")
     parser.add_argument("--test-ratio", type=float, default=0.15, help="Test ratio for generated splits.")
     parser.add_argument("--split-seed", type=int, default=0, help="Random seed for ModelNet40 sampling and splits.")
+    parser.add_argument(
+        "--create-splits",
+        action="store_true",
+        help="Create task folds after generation (ADNI always creates clinical folds when a manifest is supplied).",
+    )
     parser.add_argument(
         "--no-resume",
         dest="resume",
@@ -234,6 +277,116 @@ def _modelnet40_mesh_inputs(root: Path, percentage: float, seed: int) -> List[Me
     return sorted(selected, key=lambda item: str(item.path))
 
 
+ADNI_DIAGNOSIS_TO_CLASS = {
+    "CN": ("CN", 0),
+    "SMC": ("CN", 0),
+    "EMCI": ("MCI", 1),
+    "LMCI": ("MCI", 1),
+    "MCI": ("MCI", 1),
+    "AD": ("AD", 2),
+}
+_ADNI_FILENAME_RE = re.compile(
+    r"^(?P<participant>sub-[A-Za-z0-9]+)-ses-(?P<session>M\d+)_hip_(?P<hip>left|right)$",
+    re.IGNORECASE,
+)
+
+
+def _load_adni_manifest(path: Path) -> Dict[str, Dict[str, str]]:
+    """Load the local ADNI participant manifest without copying its contents anywhere."""
+    if not path.is_file():
+        raise FileNotFoundError(f"ADNI participants manifest not found: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if not reader.fieldnames or "participant_id" not in reader.fieldnames or "diagnosis_sc" not in reader.fieldnames:
+            raise ValueError("ADNI manifest must contain participant_id and diagnosis_sc columns")
+        manifest: Dict[str, Dict[str, str]] = {}
+        for row in reader:
+            participant = (row.get("participant_id") or "").strip()
+            diagnosis = (row.get("diagnosis_sc") or "").strip().upper()
+            if not participant or diagnosis not in ADNI_DIAGNOSIS_TO_CLASS:
+                continue
+            manifest[participant] = {"participant_id": participant, "diagnosis_sc": diagnosis}
+    if not manifest:
+        raise ValueError(f"ADNI manifest contains no supported diagnosis rows: {path}")
+    return manifest
+
+
+def _adni_mesh_inputs(
+    root: Path,
+    manifest_path: Path,
+    session_filter: str,
+    hip_filter: str,
+) -> Tuple[List[MeshInput], List[str]]:
+    manifest = _load_adni_manifest(manifest_path)
+    candidates: List[MeshInput] = []
+    skipped: List[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in MESH_EXTS:
+            continue
+        match = _ADNI_FILENAME_RE.match(path.stem)
+        if match is None:
+            skipped.append(f"{path.name}: filename does not match sub-<id>-ses-Mxxx_hip_<left|right>")
+            continue
+        participant = match.group("participant")
+        row = manifest.get(participant)
+        if row is None:
+            skipped.append(f"{path.name}: participant {participant} absent from manifest")
+            continue
+        hip = match.group("hip").lower()
+        session = match.group("session").upper()
+        session_number = int(session[1:])
+        class_name, class_id = ADNI_DIAGNOSIS_TO_CLASS[row["diagnosis_sc"]]
+        candidates.append(
+            MeshInput(
+                path=path,
+                sample_name=path.stem,
+                dataname="ADNI",
+                source_root=root,
+                class_name=class_name,
+                class_id=class_id,
+                participant_id=participant,
+                diagnosis_sc=row["diagnosis_sc"],
+                session=f"ses-{session}",
+                session_number=session_number,
+                hip=hip,
+            )
+        )
+    if session_filter != "none":
+        by_participant: Dict[str, List[MeshInput]] = {}
+        for item in candidates:
+            by_participant.setdefault(str(item.participant_id), []).append(item)
+        candidates = [
+            item
+            for participant_items in by_participant.values()
+            for item in participant_items
+            if item.session_number == (
+                min(x.session_number for x in participant_items)
+                if session_filter == "first"
+                else max(x.session_number for x in participant_items)
+            )
+        ]
+    if hip_filter != "both":
+        candidates = [item for item in candidates if item.hip == hip_filter]
+    return sorted(candidates, key=lambda item: item.sample_name), skipped
+
+
+def _adni_request_matches(
+    label: Dict[str, Any],
+    manifest: Optional[Path],
+    output_root: Path,
+    session_filter: str,
+    hip_filter: str,
+) -> bool:
+    metadata = label.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("adni_session_filter") != session_filter or metadata.get("adni_hip_filter") != hip_filter:
+        return False
+    if manifest is not None and metadata.get("adni_manifest") != _resolve_relative(manifest, output_root):
+        return False
+    return True
+
+
 def _build_signal(
     *,
     dataname: str,
@@ -271,8 +424,8 @@ def _build_signal(
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    if args.mobius_center and args.param_method != "cem":
-        print("ERROR: --mobius-center requires --param-method cem.")
+    if args.mobius_center and args.param_method not in ("cem", "spheremap"):
+        print("ERROR: --mobius-center requires --param-method cem or spheremap.")
         return 1
     if args.anchor_diagnostics and args.param_method != "cem":
         print("ERROR: --anchor-diagnostics requires --param-method cem.")
@@ -309,7 +462,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             save_sample_mesh,
             save_spherical_parametrization,
         )
-        from spherepar.benchmark.splits import TASK_MODELNET40_CLS, build_task_splits
+        from spherepar.benchmark.splits import TASK_ADNI_CLS, TASK_MODELNET40_CLS, build_task_splits
     except ModuleNotFoundError as exc:
         print(
             "ERROR: missing Python dependency while importing spherepar modules. "
@@ -318,6 +471,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     input_dir = Path(args.input_dir).expanduser().resolve() if args.input_dir else None
+    adni_manifest = Path(args.adni_participants).expanduser().resolve() if args.adni_participants else None
     output_root = Path(args.output_root).expanduser().resolve()
     faust_dir = Path(args.faust_dir).expanduser().resolve() if args.faust_dir else None
     cylinders_dir = Path(args.cylinders_dir).expanduser().resolve() if args.cylinders_dir else None
@@ -325,6 +479,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if all(path is None for path in (input_dir, faust_dir, cylinders_dir, modelnet40_dir)):
         print("ERROR: provide one input root: --input-dir, --faust-dir, --cylinders-dir, or --modelnet40-dir.")
+        return 1
+    if adni_manifest is not None and input_dir is None:
+        print("ERROR: --adni-participants requires --input-dir pointing to ADNI mesh files.")
+        return 1
+    if adni_manifest is not None and any(path is not None for path in (faust_dir, cylinders_dir, modelnet40_dir)):
+        print("ERROR: --adni-participants is only supported with --input-dir.")
         return 1
     if not 1.0 <= args.percentage <= 100.0:
         print("ERROR: --percentage must be in the range [1, 100].")
@@ -343,6 +503,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     log_path = output_dirs["logs"] / "errors.log"
     mode: str
     mesh_inputs: List[MeshInput]
+    adni_skipped: List[str] = []
     if faust_dir is not None:
         if not faust_dir.is_dir():
             print(f"ERROR: FAUST directory not found: {faust_dir}")
@@ -369,8 +530,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         if input_dir is None or not input_dir.is_dir():
             print(f"ERROR: input directory not found: {input_dir}")
             return 1
-        mode = args.dataname.strip().upper()
-        mesh_inputs = _flat_mesh_inputs(input_dir, mode)
+        if adni_manifest is not None:
+            try:
+                mode = "ADNI"
+                mesh_inputs, adni_skipped = _adni_mesh_inputs(
+                    input_dir,
+                    adni_manifest,
+                    args.adni_session,
+                    args.adni_hip,
+                )
+            except (OSError, ValueError) as exc:
+                print(f"ERROR: could not load ADNI inputs: {exc}")
+                return 1
+        else:
+            mode = args.dataname.strip().upper()
+            mesh_inputs = _flat_mesh_inputs(input_dir, mode)
+
+    if adni_skipped:
+        print(f"ADNI discovery skipped {len(adni_skipped)} file(s) (see {log_path})")
+        for message in adni_skipped:
+            append_error_log(str(log_path), "adni_discovery", message)
 
     if not mesh_inputs:
         location = (
@@ -401,6 +580,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                 bool(args.reject_retry),
                 int(args.cem_max_attempts),
                 int(args.cem_max_collapsed_faces),
+                args.spheremap_binary,
+                args.spheremap_repository,
+                bool(args.spheremap_auto_build),
+                int(args.spheremap_iters),
+                float(args.spheremap_step_size),
+                int(args.spheremap_threads),
+                bool(args.spheremap_no_center),
+                args.spheremap_degree,
+                args.spheremap_a_steps,
+                args.spheremap_a_step_size,
+                args.spheremap_poincare_max_norm,
+                args.spheremap_c2i,
+                args.spheremap_gss_tolerance,
+                bool(args.spheremap_lump),
+                bool(args.spheremap_verbose),
+            )
+            and (
+                mode != "ADNI"
+                or _adni_request_matches(
+                    completed_samples[sample_id],
+                    adni_manifest,
+                    output_root,
+                    args.adni_session,
+                    args.adni_hip,
+                )
             )
         }
         print(
@@ -440,6 +644,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Output root     : {output_root}")
     print(f"Found meshes    : {total}")
     print(f"Dataset mode    : {mode.lower()}")
+    if mode == "ADNI":
+        print(f"ADNI manifest   : {adni_manifest}")
+        print(f"ADNI session    : {args.adni_session}")
+        print(f"ADNI hip        : {args.adni_hip}")
     print(f"Param method    : {args.param_method}")
     print(f"CEM radius      : {args.cem_radius}")
     print(f"Möbius center  : {args.mobius_center}")
@@ -480,6 +688,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             sphere_rel: Optional[str] = None
             spherical_label_rel: Optional[str] = None
+            sphere_paths: Dict[str, Any] = {}
             param_error: Optional[str] = None
             param_success = False
             try:
@@ -503,6 +712,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                     reject_retry=bool(args.reject_retry),
                     cem_max_attempts=int(args.cem_max_attempts),
                     cem_max_collapsed_faces=int(args.cem_max_collapsed_faces),
+                    spheremap_binary=args.spheremap_binary,
+                    spheremap_repository=args.spheremap_repository,
+                    spheremap_auto_build=bool(args.spheremap_auto_build),
+                    spheremap_iters=int(args.spheremap_iters),
+                    spheremap_step_size=float(args.spheremap_step_size),
+                    spheremap_threads=int(args.spheremap_threads),
+                    spheremap_no_center=bool(args.spheremap_no_center),
+                    spheremap_degree=args.spheremap_degree,
+                    spheremap_a_steps=args.spheremap_a_steps,
+                    spheremap_a_step_size=args.spheremap_a_step_size,
+                    spheremap_poincare_max_norm=args.spheremap_poincare_max_norm,
+                    spheremap_c2i=args.spheremap_c2i,
+                    spheremap_gss_tolerance=args.spheremap_gss_tolerance,
+                    spheremap_lump=bool(args.spheremap_lump),
+                    spheremap_verbose=bool(args.spheremap_verbose),
                     log_path=str(log_path),
                     template_id=sample_name,
                     deformation_case="case1_no",
@@ -560,6 +784,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "reject_retry": bool(args.reject_retry),
                     "cem_max_attempts": int(args.cem_max_attempts),
                     "cem_max_collapsed_faces": int(args.cem_max_collapsed_faces),
+                    "spheremap_binary": args.spheremap_binary,
+                    "spheremap_repository": args.spheremap_repository,
+                    "spheremap_auto_build": bool(args.spheremap_auto_build),
+                    "spheremap_iters": int(args.spheremap_iters),
+                    "spheremap_step_size": float(args.spheremap_step_size),
+                    "spheremap_threads": int(args.spheremap_threads),
+                    "spheremap_no_center": bool(args.spheremap_no_center),
+                    "spheremap_degree": args.spheremap_degree,
+                    "spheremap_a_steps": args.spheremap_a_steps,
+                    "spheremap_a_step_size": args.spheremap_a_step_size,
+                    "spheremap_poincare_max_norm": args.spheremap_poincare_max_norm,
+                    "spheremap_c2i": args.spheremap_c2i,
+                    "spheremap_gss_tolerance": args.spheremap_gss_tolerance,
+                    "spheremap_lump": bool(args.spheremap_lump),
+                    "spheremap_verbose": bool(args.spheremap_verbose),
                 },
                 "paths": {
                     "mesh": mesh_rel,
@@ -601,10 +840,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ],
                 "tasks": (
                     {
-                        TASK_MODELNET40_CLS: {
+                        (TASK_ADNI_CLS if mode == "ADNI" else TASK_MODELNET40_CLS): {
                             "valid": True,
                             "label": mesh_input.class_id,
                             "class_name": mesh_input.class_name,
+                            **(
+                                {
+                                    "participant_id": mesh_input.participant_id,
+                                    "diagnosis_sc": mesh_input.diagnosis_sc,
+                                    "session": mesh_input.session,
+                                    "hip": mesh_input.hip,
+                                }
+                                if mode == "ADNI"
+                                else {}
+                            ),
                         }
                     }
                     if mesh_input.class_id is not None
@@ -628,6 +877,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "reject_retry": bool(args.reject_retry),
                     "cem_max_attempts": int(args.cem_max_attempts),
                     "cem_max_collapsed_faces": int(args.cem_max_collapsed_faces),
+                    "spheremap_binary": args.spheremap_binary,
+                    "spheremap_repository": args.spheremap_repository,
+                    "spheremap_auto_build": bool(args.spheremap_auto_build),
+                    "spheremap_iters": int(args.spheremap_iters),
+                    "spheremap_step_size": float(args.spheremap_step_size),
+                    "spheremap_threads": int(args.spheremap_threads),
+                    "spheremap_no_center": bool(args.spheremap_no_center),
+                    "spheremap_degree": args.spheremap_degree,
+                    "spheremap_a_steps": args.spheremap_a_steps,
+                    "spheremap_a_step_size": args.spheremap_a_step_size,
+                    "spheremap_poincare_max_norm": args.spheremap_poincare_max_norm,
+                    "spheremap_c2i": args.spheremap_c2i,
+                    "spheremap_gss_tolerance": args.spheremap_gss_tolerance,
+                    "spheremap_lump": bool(args.spheremap_lump),
+                    "spheremap_verbose": bool(args.spheremap_verbose),
                     "success": bool(param_success),
                     "error": param_error,
                 },
@@ -640,6 +904,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "class_name": mesh_input.class_name,
                         "class_id": mesh_input.class_id,
                         "source_split": mesh_input.source_split,
+                    }
+                )
+            if mode == "ADNI":
+                label["metadata"].update(
+                    {
+                        "adni_manifest": _resolve_relative(adni_manifest, output_root)
+                        if adni_manifest is not None
+                        else None,
+                        "adni_session_filter": args.adni_session,
+                        "adni_hip_filter": args.adni_hip,
+                        "participant_id": mesh_input.participant_id,
+                        "diagnosis_sc": mesh_input.diagnosis_sc,
+                        "session": mesh_input.session,
+                        "hip": mesh_input.hip,
                     }
                 )
 
@@ -676,6 +954,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:  # noqa: BLE001
             append_error_log(str(log_path), "split_builder", f"split generation failed: {exc}")
             print(f"ModelNet40 split generation failed: {exc}")
+            failed += 1
+
+    if mode == "ADNI" and (args.create_splits or adni_manifest is not None):
+        try:
+            build_task_splits(
+                dataset_root=str(output_root),
+                tasks=[TASK_ADNI_CLS],
+                num_folds=int(args.num_folds),
+                train_ratio=float(args.train_ratio),
+                val_ratio=float(args.val_ratio),
+                test_ratio=float(args.test_ratio),
+                seed=int(args.split_seed),
+                group_by_template=False,
+            )
+            print(f"ADNI clinical splits written under {output_root / 'folds'}")
+        except Exception as exc:  # noqa: BLE001
+            append_error_log(str(log_path), "split_builder", f"ADNI split generation failed: {exc}")
+            print(f"ADNI split generation failed: {exc}")
             failed += 1
 
     print("=" * 68)
