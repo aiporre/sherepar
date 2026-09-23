@@ -124,6 +124,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cem-max-attempts", type=int, default=5, help="Maximum total CEM radius attempts.")
     parser.add_argument("--cem-max-collapsed-faces", type=int, default=0, help="Accepted collapsed-face limit.")
     parser.add_argument("--cem-verbose", action="store_true", help="Verbose CEM output.")
+    parser.add_argument(
+        "--force-outward-winding",
+        action="store_true",
+        help="For CEM, reverse every inward spherical face (mesh-repair mode; hides fold diagnostics).",
+    )
     parser.add_argument("--spheremap-binary", default=None, help="Path to the MoebiusRegistration SphereMap binary.")
     parser.add_argument("--spheremap-repository", default=None, help="MoebiusRegistration repository containing spheremap/ and Bin/Linux/SphereMap.")
     parser.add_argument("--spheremap-auto-build", action="store_true", help="Build SphereMap if the binary is missing.")
@@ -430,6 +435,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.anchor_diagnostics and args.param_method != "cem":
         print("ERROR: --anchor-diagnostics requires --param-method cem.")
         return 1
+    if args.force_outward_winding and args.param_method != "cem":
+        print("ERROR: --force-outward-winding requires --param-method cem.")
+        return 1
     if (args.use_idt_remesh or args.adaptive_radius or args.reject_retry) and args.param_method != "cem":
         print("ERROR: CEM Phase 2 options require --param-method cem.")
         return 1
@@ -595,6 +603,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.spheremap_gss_tolerance,
                 bool(args.spheremap_lump),
                 bool(args.spheremap_verbose),
+                bool(args.force_outward_winding),
             )
             and (
                 mode != "ADNI"
@@ -703,6 +712,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     cem_verbose=bool(args.cem_verbose),
                     cem_radius=float(args.cem_radius),
                     mobius_center=bool(args.mobius_center),
+                    force_outward_winding=bool(args.force_outward_winding),
                     anchor_diagnostics=bool(args.anchor_diagnostics),
                     anchor_strategy=args.anchor_strategy,
                     anchor_regularity_percentile=float(args.anchor_regularity_percentile),
@@ -771,6 +781,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "created_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "source_mesh": _resolve_relative(mesh_src_path, mesh_input.source_root),
                     "mobius_center": bool(args.mobius_center),
+                    "force_outward_winding": bool(args.force_outward_winding),
                     "cem_radius": float(args.cem_radius) if args.param_method == "cem" else None,
                     "anchor_diagnostics": bool(args.anchor_diagnostics),
                     "anchor_strategy": args.anchor_strategy if args.param_method == "cem" else None,
@@ -864,7 +875,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "method": args.param_method,
                     "cem_radius": float(args.cem_radius) if args.param_method == "cem" else None,
                     "cem_selected_radius": sphere_paths.get("cem_selected_radius") if sphere_rel else None,
+                    "face_winding_correction": sphere_paths.get("face_winding_correction") if sphere_rel else None,
                     "mobius_center": bool(args.mobius_center),
+                    "force_outward_winding": bool(args.force_outward_winding),
                     "anchor_diagnostics": bool(args.anchor_diagnostics),
                     "anchor_strategy": args.anchor_strategy if args.param_method == "cem" else None,
                     "anchor_regularity_percentile": (

@@ -118,10 +118,15 @@ def measure_sample(
         if mesh_path is not None:
             mesh = _load_triangle_mesh(mesh_path)
             mesh_faces = np.asarray(mesh.faces, dtype=np.int64)
-            topology_ok = (
+            topology_exact = (
                 len(mesh.vertices) == len(unit_vertices)
                 and mesh_faces.shape == sphere_faces.shape
                 and np.array_equal(mesh_faces, sphere_faces)
+            )
+            topology_ok = topology_exact or (
+                len(mesh.vertices) == len(unit_vertices)
+                and mesh_faces.shape == sphere_faces.shape
+                and np.array_equal(np.sort(mesh_faces, axis=1), np.sort(sphere_faces, axis=1))
             )
         result.update(
             {
@@ -129,6 +134,7 @@ def measure_sample(
                 "vertex_count": int(len(unit_vertices)),
                 "face_count": int(len(sphere_faces)),
                 "topology_ok": topology_ok,
+                "topology_exact": topology_exact,
                 "collapsed_count": int(np.count_nonzero(actual_zero | near_zero)),
                 "collapsed_fraction": float(np.mean(actual_zero | near_zero)),
                 "actual_zero_count": int(np.count_nonzero(actual_zero)),

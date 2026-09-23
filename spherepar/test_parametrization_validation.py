@@ -3,11 +3,47 @@ import numpy as np
 import pytest
 
 from spherepar.spherical_parametrization import (
+    orient_sphere_faces_outward,
     verify_topology_preserved,
     verify_normal_orientation_preserved,
     _compute_face_normals,
     validate_sphere_parameterization,
 )
+
+
+def test_global_inward_winding_is_reversed_without_per_face_fold_fix():
+    vertices = np.array(
+        [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    faces = np.array([[0, 2, 1], [0, 3, 2]], dtype=np.int32)
+    corrected, metadata = orient_sphere_faces_outward(vertices, faces)
+    assert metadata["applied"] is True
+    assert np.array_equal(corrected, faces[:, [0, 2, 1]])
+
+
+def test_mixed_winding_is_retained_for_fold_diagnostics():
+    vertices = np.array(
+        [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    faces = np.array([[0, 1, 2], [0, 3, 2]], dtype=np.int32)
+    corrected, metadata = orient_sphere_faces_outward(vertices, faces)
+    assert metadata["applied"] is False
+    assert np.array_equal(corrected, faces)
+
+
+def test_force_outward_winding_reverses_local_inward_faces():
+    vertices = np.array(
+        [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    faces = np.array([[0, 1, 2], [0, 3, 2]], dtype=np.int32)
+    corrected, metadata = orient_sphere_faces_outward(vertices, faces, force_all=True)
+    assert metadata["scope"] == "per_face_force"
+    assert metadata["flipped_face_count"] == 1
+    assert np.array_equal(corrected[0], faces[0])
+    assert np.array_equal(corrected[1], faces[1][[0, 2, 1]])
 
 
 class TestComputeFaceNormals:

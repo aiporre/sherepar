@@ -55,6 +55,55 @@ def _compute_face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray
     return normals
 
 
+def orient_sphere_faces_outward(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    tolerance: float = SPHERE_ORIENTATION_TOLERANCE,
+    force_all: bool = False,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Correct spherical face winding.
+
+    By default, only an entirely inward winding is corrected by one global
+    reversal. With ``force_all=True``, every inward face is reversed
+    individually; this is an intentional mesh-repair mode and hides local
+    fold diagnostics.
+    """
+    sphere_vertices = np.asarray(vertices, dtype=np.float64)
+    sphere_faces = np.asarray(faces, dtype=np.int32)
+    triangles = sphere_vertices[sphere_faces]
+    cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    signed = np.einsum("ij,ij->i", cross, triangles.mean(axis=1))
+    nondegenerate = np.abs(signed) > float(tolerance)
+    inward = int(np.count_nonzero(signed[nondegenerate] < -float(tolerance)))
+    outward = int(np.count_nonzero(signed[nondegenerate] > float(tolerance)))
+    globally_inward = bool(
+        nondegenerate.any()
+        and inward == int(np.count_nonzero(nondegenerate))
+        and outward == 0
+    )
+    flip_mask = (signed < -float(tolerance)) if force_all else np.full(len(sphere_faces), globally_inward)
+    flip_mask &= nondegenerate
+    corrected = sphere_faces.copy()
+    corrected[flip_mask] = corrected[flip_mask][:, [0, 2, 1]]
+    applied = bool(np.any(flip_mask))
+    return corrected, {
+        "applied": applied,
+        "scope": "per_face_force" if force_all else "global_only",
+        "reason": (
+            "all inward faces were individually reversed by force_all"
+            if force_all and applied
+            else "all non-degenerate faces were inward"
+            if applied
+            else "mixed_or_outward_orientation"
+        ),
+        "tolerance": float(tolerance),
+        "inward_face_count_before": inward,
+        "outward_face_count_before": outward,
+        "near_zero_face_count": int(np.count_nonzero(~nondegenerate)),
+        "flipped_face_count": int(np.count_nonzero(flip_mask)),
+    }
+
+
 def verify_topology_preserved(
     vertices_orig: np.ndarray,
     faces_orig: np.ndarray,
@@ -220,6 +269,7 @@ def compute_spherical_parametrization(
     cem_radius: float = 1.2,
     verify: bool = True,
     mobius_center: bool = False,
+    force_outward_winding: bool = False,
     cem_input_diagnostics_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     anchor_diagnostics: bool = False,
     anchor_strategy: str = "regular",
@@ -268,6 +318,9 @@ def compute_spherical_parametrization(
         If True, validate topology and normal orientation after parametrization.
     mobius_center : bool
         If True, apply area-weighted Möbius centering after CEM or SphereMap.
+    force_outward_winding : bool
+        For CEM output, reverse the complete face array only when every
+        non-degenerate sphere face is inward. Mixed/folded faces are retained.
     cem_input_diagnostics_callback : callable, optional
         Receives CEM input-quality diagnostics immediately before Algorithm 4.1.
     anchor_diagnostics : bool
@@ -295,6 +348,8 @@ def compute_spherical_parametrization(
         raise ValueError("mobius_center is supported only with method='cem' or 'spheremap'")
     if anchor_diagnostics and method != "cem":
         raise ValueError("anchor_diagnostics is supported only with method='cem'")
+    if force_outward_winding and method != "cem":
+        raise ValueError("force_outward_winding is supported only with method='cem'")
     if (use_idt_remesh or adaptive_radius or reject_retry) and method != "cem":
         raise ValueError("CEM Phase 2 options are supported only with method='cem'")
 
@@ -446,6 +501,7 @@ def compute_spherical_parametrization(
         )
 
     meta["mobius_center"] = bool(mobius_center)
+    meta["force_outward_winding"] = bool(force_outward_winding)
 
     norms = np.linalg.norm(sphere_vertices, axis=1)
     meta.update(

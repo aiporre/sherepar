@@ -329,6 +329,11 @@ The generated labels contain an `adni_cls` task with the integer label,
 participant ID, diagnosis, session, and hip metadata; folds are written under
 `folds/fold*/adni_cls/`.
 
+For CEM outputs, add `--force-outward-winding` to reverse every inward
+spherical face. This is a mesh-repair mode: it intentionally removes local
+fold orientation from the saved mesh, and records the changed face count in
+`face_winding_correction` metadata.
+
 ## MNIST
 
 Use `examples/script_to_generate_dataset.py` with `--signal-type mnist`.

@@ -71,7 +71,10 @@ import trimesh.smoothing
 from spherepar.benchmark.utils import extract_roi_patch
 from spherepar.benchmark.surface import Surface, SurfaceFactory
 from spherepar.benchmark.signals import sample_hm_major_axis
-from spherepar.spherical_parametrization import compute_spherical_parametrization
+from spherepar.spherical_parametrization import (
+    compute_spherical_parametrization,
+    orient_sphere_faces_outward,
+)
 from spherepar.benchmark.splits import build_task_splits, DEFAULT_TASKS
 from spherepar.s2cnn.gendata import get_projection_grid, project_2d_on_sphere
 
@@ -831,6 +834,7 @@ def parametrization_request_matches(
     spheremap_gss_tolerance: Optional[float] = 1e-6,
     spheremap_lump: bool = False,
     spheremap_verbose: bool = False,
+    force_outward_winding: bool = False,
 ) -> bool:
     """Return whether a completed label matches the requested sphere settings."""
     parametrization = label.get("parametrization", {})
@@ -841,6 +845,12 @@ def parametrization_request_matches(
     if bool(parametrization.get("mobius_center", False)) != bool(mobius_center):
         return False
     if method == "cem":
+        if bool(parametrization.get("force_outward_winding", False)) != bool(force_outward_winding):
+            return False
+        if force_outward_winding:
+            correction = parametrization.get("face_winding_correction")
+            if not isinstance(correction, dict) or correction.get("scope") != "per_face_force":
+                return False
         if bool(parametrization.get("use_idt_remesh", False)) != bool(use_idt_remesh):
             return False
         if bool(parametrization.get("adaptive_radius", False)) != bool(adaptive_radius):
@@ -1577,6 +1587,7 @@ def save_spherical_parametrization(
         template_id: Optional[str] = None,
         deformation_case: Optional[str] = None,
         mobius_center: bool = False,
+        force_outward_winding: bool = False,
         anchor_diagnostics: bool = False,
         anchor_strategy: str = "regular",
         anchor_regularity_percentile: float = 10.0,
@@ -1632,6 +1643,7 @@ def save_spherical_parametrization(
         cem_verbose=cem_verbose,
         cem_radius=cem_radius,
         mobius_center=mobius_center,
+        force_outward_winding=force_outward_winding,
         anchor_diagnostics=anchor_diagnostics,
         anchor_strategy=anchor_strategy,
         anchor_regularity_percentile=anchor_regularity_percentile,
@@ -1662,9 +1674,40 @@ def save_spherical_parametrization(
         verify=True,
     )
 
+    sphere_faces = np.asarray(faces, dtype=np.int32)
+    if method == "cem" and force_outward_winding:
+        sphere_faces, winding_correction = orient_sphere_faces_outward(
+            sphere_vertices,
+            sphere_faces,
+            force_all=True,
+        )
+        sphere_meta["face_winding_correction"] = winding_correction
+        if winding_correction["applied"]:
+            # The correction is global, so it preserves all undirected edges
+            # and areas while making an otherwise entirely inward sphere
+            # outward-facing. Mixed/folded faces are never individually flipped.
+            validation = sphere_meta.get("sphere_validation")
+            if isinstance(validation, dict):
+                validation["orientation"] = "outward"
+                validation["outward_face_count"] = int(
+                    validation.get("outward_face_count", 0)
+                    + validation.get("inward_face_count", 0)
+                )
+                validation["inward_face_count"] = 0
+                validation["near_zero_orientation_face_count"] = int(
+                    validation.get("near_zero_orientation_face_count", 0)
+                )
+                validation["errors"] = [
+                    error for error in validation.get("errors", [])
+                    if error != "sphere has folded or inconsistently oriented faces"
+                ]
+            topology_report = sphere_meta.get("topology_report")
+            if isinstance(topology_report, dict):
+                topology_report["face_winding_reversed_globally"] = True
+
     sphere_mesh = trimesh.Trimesh(
         vertices=sphere_vertices,
-        faces=np.asarray(faces, dtype=np.int32),
+        faces=sphere_faces,
         process=False,
     )
     sphere_path = spheres_dir / f"{name}.obj"
@@ -1773,6 +1816,7 @@ def save_spherical_parametrization(
         "parametrization_success": not rejected,
         "parametrization_error": rejection_error,
         "cem_selected_radius": sphere_meta.get("cem_selected_radius"),
+        "face_winding_correction": sphere_meta.get("face_winding_correction"),
     }
 
 
@@ -3493,6 +3537,7 @@ def generate_dataset(
                             "spheremap_lump": bool(spheremap_lump) if effective_param_method == "spheremap" else False,
                             "spheremap_verbose": bool(spheremap_verbose) if effective_param_method == "spheremap" else False,
                             "cem_selected_radius": paths.get("cem_selected_radius"),
+                            "face_winding_correction": paths.get("face_winding_correction"),
                             "use_idt_remesh": bool(use_idt_remesh),
                             "adaptive_radius": bool(adaptive_radius),
                             "cem_radius_candidates": list(cem_radius_candidates),
