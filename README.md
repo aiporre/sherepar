@@ -306,13 +306,29 @@ python examples/count_modelnet40_classes.py data/imported_modelnet40
 
 ### ADNI clinical classification
 
-Use the ADNI mesh directory together with the local `participants.tsv` manifest.
-The importer maps `CN`/`SMC` to class 0 (`CN`), `EMCI`/`LMCI`/`MCI` to
-class 1 (`MCI`), and `AD` to class 2 (`AD`). The manifest is read locally;
-its contents are not copied into the generated dataset. Folds are stratified
-by participant, so no participant's sessions or hip sides can cross a split:
+The ADNI importer is `examples/script_to_generate_dataset_from_files.py`.
+It reads existing hippocampus meshes and the local `participants.tsv`, assigns
+clinical labels, computes a spherical parametrization, and builds classification
+folds. It does not deform the meshes. The deformation generator
+(`examples/script_to_generate_dataset.py`) does not read the ADNI manifest or
+assign clinical labels.
+
+The mesh root can contain nested directories. Supported extensions are `.obj`,
+`.ply`, `.stl`, and `.off`; each filename stem must match
+`sub-<id>-ses-M<digits>_hip_<left|right>` (for example,
+`sub-0123-ses-M006_hip_left.obj`). Each stem should be unique across the mesh
+root because output files are named from the stem. The tab-separated manifest
+must contain `participant_id` and `diagnosis_sc` columns, with participant IDs
+matching the filename. The importer maps `CN`/`SMC` to class 0 (`CN`),
+`EMCI`/`LMCI`/`MCI` to class 1 (`MCI`), and `AD` to class 2 (`AD`). Unknown
+diagnoses and meshes with no matching manifest participant are skipped.
+
+On Hippocampus, run this from the repository root. Replace all four absolute
+paths with their locations on that machine:
 
 ```bash
+cd /path/to/sherepar
+
 python examples/script_to_generate_dataset_from_files.py \
     --input-dir /path/to/ADNI/fixmodels_mni \
     --adni-participants /path/to/ADNI/participants.tsv \
@@ -320,14 +336,59 @@ python examples/script_to_generate_dataset_from_files.py \
     --adni-hip both \
     --param-method cem \
     --anchor-strategy central_regular \
-    --output-root data/imported_adni_cls
+    --output-root /path/to/imported_adni_cls
 ```
 
-Use `--adni-session none` to retain every session, or `last` for the latest
-numeric session per participant. `--adni-hip left` and `right` select one side.
-The generated labels contain an `adni_cls` task with the integer label,
-participant ID, diagnosis, session, and hip metadata; folds are written under
-`folds/fold*/adni_cls/`.
+The example selects each participant's first numeric session and both hip
+sides. Use `--adni-session none` to retain all sessions (the default), or
+`last` for the latest. Use `--adni-hip left` or `right` for one side. The
+example uses CEM with the `central_regular` anchor; `--param-method flash`
+is the default if no method is specified.
+
+For the local smoothed ADNI templates, the following run uses SphereMap
+(the MoebiusRegistration binary) with 25 CMCF iterations, step size 1.0,
+and four SphereMap threads. Run it from the repository root:
+
+```bash
+MPLCONFIGDIR=/tmp/sherepar-mpl python examples/script_to_generate_dataset_from_files.py \
+    --input-dir /media/sauron/GG2/datasets/deformed_blobs/adni_3000/templates_filtered_smooth \
+    --adni-participants /media/sauron/GG2/datasets/ADNI/participants.tsv \
+    --adni-session first \
+    --adni-hip left \
+    --param-method spheremap \
+    --spheremap-binary /home/sauron/Documents/Phd/code/MoebiusRegistration/Bin/Linux/SphereMap \
+    --spheremap-iters 25 \
+    --spheremap-step-size 1.0 \
+    --spheremap-threads 4 \
+    --output-root /media/sauron/GG2/datasets/deformed_blobs/adni_3000/data_cmcf_smoot \
+    --no-resume
+```
+
+This selects the first session and left hip for each participant. The
+`--no-resume` flag regenerates every selected input in the output root;
+omit it to skip completed samples on later runs. `MPLCONFIGDIR` is set on
+the Python command so the process uses `/tmp/sherepar-mpl`.
+
+For each accepted mesh, the output root contains `meshes/<stem>.obj`,
+`spheres/<stem>.obj`, `signals/<stem>.npy`, `labels/<stem>.json`, and a
+spherical sidecar under `labels/`. The signal is an all-zero `float32` array
+with one value per vertex. The label contains the `adni_cls` class,
+participant, diagnosis, session, and hip. The manifest contents are not
+copied into the output. The importer accepts only closed, connected genus-0
+meshes for spherical parametrization and reports filtered meshes in its
+summary. Discovery and processing errors are written to `logs/errors.log`.
+
+Clinical split files are written automatically to
+`folds/fold*/adni_cls/{train,val,test}.txt`. Splits are stratified by class
+and grouped by participant, keeping all of a participant's sessions and hip
+sides together. The defaults are five folds with target ratios of 70% train,
+15% validation, and 15% test; adjust them with `--num-folds`, `--train-ratio`,
+`--val-ratio`, `--test-ratio`, and `--split-seed`.
+
+Rerun the same command with the same `--output-root` to resume: complete
+samples matching the requested settings are skipped. Use `--no-resume` to
+regenerate all selected inputs. The ADNI importer has no `--workers` option;
+it processes selected meshes sequentially.
 
 For CEM outputs, add `--force-outward-winding` to reverse every inward
 spherical face. This is a mesh-repair mode: it intentionally removes local
