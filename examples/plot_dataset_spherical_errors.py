@@ -112,7 +112,9 @@ def measure_sample(
         signed, outward_count, inward_count, orientation_zero_count = _orientation(
             unit_vertices, sphere_faces
         )
-        folded = signed < -1e-12
+        # A globally inward-facing sphere is consistently oriented, not folded.
+        # Treat faces opposing the dominant nonzero radial orientation as folds.
+        folded = (signed < -1e-12) if inward_count < outward_count else (signed > 1e-12)
         topology_ok = None
         topology_exact = None
         mesh_faces = None
@@ -144,7 +146,7 @@ def measure_sample(
                 "near_zero_fraction": float(np.mean(near_zero)),
                 "folded_face_count": int(np.count_nonzero(folded)),
                 "folded_fraction": float(np.mean(folded)),
-                "folded_count": int(inward_count),
+                "folded_count": int(np.count_nonzero(folded)),
                 "outward_count": outward_count,
                 "inward_count": inward_count,
                 "near_zero_orientation_count": orientation_zero_count,
@@ -275,7 +277,7 @@ def write_report(metrics: list[dict[str, Any]], backend: str, root: Path, output
         "Triangles are normalized to the unit sphere. Actual-zero triangles have "
         "exactly zero twice-area; near-zero triangles have positive twice-area "
         "at or below `max(1e-12, 1e-4 * median_twice_area)`; folded triangles "
-        "have negative radial orientation. Plot colors use actual-zero, near-zero, "
+        "have radial orientation opposite to the dominant face orientation. Plot colors use actual-zero, near-zero, "
         "folded, then normal precedence.",
         "",
         "| Sample | Faces | Folded | Near-zero | Actual-zero | Threshold | Status |",
