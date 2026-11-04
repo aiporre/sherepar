@@ -75,6 +75,7 @@ from spherepar.spherical_parametrization import (
     compute_spherical_parametrization,
     orient_sphere_faces_outward,
 )
+from spherepar.parametrization_validation import validate_sphere_parameterization
 from spherepar.benchmark.splits import build_task_splits, DEFAULT_TASKS
 from spherepar.s2cnn.gendata import get_projection_grid, project_2d_on_sphere
 
@@ -1679,28 +1680,17 @@ def save_spherical_parametrization(
         sphere_faces, winding_correction = orient_sphere_faces_outward(
             sphere_vertices,
             sphere_faces,
-            force_all=True,
+            force_all=False,
         )
         sphere_meta["face_winding_correction"] = winding_correction
         if winding_correction["applied"]:
-            # The correction is global, so it preserves all undirected edges
-            # and areas while making an otherwise entirely inward sphere
-            # outward-facing. Mixed/folded faces are never individually flipped.
-            validation = sphere_meta.get("sphere_validation")
-            if isinstance(validation, dict):
-                validation["orientation"] = "outward"
-                validation["outward_face_count"] = int(
-                    validation.get("outward_face_count", 0)
-                    + validation.get("inward_face_count", 0)
-                )
-                validation["inward_face_count"] = 0
-                validation["near_zero_orientation_face_count"] = int(
-                    validation.get("near_zero_orientation_face_count", 0)
-                )
-                validation["errors"] = [
-                    error for error in validation.get("errors", [])
-                    if error != "sphere has folded or inconsistently oriented faces"
-                ]
+            # Recompute geometry diagnostics against the exported face array.
+            sphere_meta["sphere_validation"] = validate_sphere_parameterization(
+                np.asarray(vertices, dtype=np.float64),
+                sphere_faces,
+                sphere_vertices,
+                sphere_faces,
+            )
             topology_report = sphere_meta.get("topology_report")
             if isinstance(topology_report, dict):
                 topology_report["face_winding_reversed_globally"] = True

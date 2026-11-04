@@ -13,6 +13,73 @@ SPHERE_MIN_AREA_RELATIVE_TO_MEDIAN = 1e-4
 SPHERE_ORIENTATION_TOLERANCE = 1e-12
 
 
+def edge_winding_diagnostics(faces: np.ndarray) -> Dict[str, Any]:
+    """Report boundary, non-manifold, and same-direction edge incidences."""
+    faces_array = np.asarray(faces, dtype=np.int64)
+    incidences: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for face in faces_array:
+        for start, end in zip(face, np.roll(face, -1)):
+            key = tuple(sorted((int(start), int(end))))
+            incidences.setdefault(key, []).append((int(start), int(end)))
+
+    boundary_edges = [edge for edge, values in incidences.items() if len(values) == 1]
+    nonmanifold_edges = [edge for edge, values in incidences.items() if len(values) > 2]
+    same_direction_edges = [
+        edge for edge, values in incidences.items()
+        if len(values) == 2 and values[0] == values[1]
+    ]
+    return {
+        "edge_count": int(len(incidences)),
+        "boundary_edge_count": int(len(boundary_edges)),
+        "nonmanifold_edge_count": int(len(nonmanifold_edges)),
+        "same_direction_edge_count": int(len(same_direction_edges)),
+        "boundary_edges": boundary_edges,
+        "nonmanifold_edges": nonmanifold_edges,
+        "same_direction_edges": same_direction_edges,
+        "is_consistent": not (
+            boundary_edges or nonmanifold_edges or same_direction_edges
+        ),
+    }
+
+
+def classify_sphere_orientation(
+    signed_orientation: np.ndarray,
+    tolerance: float = SPHERE_ORIENTATION_TOLERANCE,
+) -> Dict[str, Any]:
+    """Classify global winding separately from locally opposing faces."""
+    signed = np.asarray(signed_orientation, dtype=np.float64)
+    near_zero = np.abs(signed) <= float(tolerance)
+    outward = signed > float(tolerance)
+    inward = signed < -float(tolerance)
+    outward_count = int(np.count_nonzero(outward))
+    inward_count = int(np.count_nonzero(inward))
+    nonzero_count = outward_count + inward_count
+    dominant = (
+        "outward" if outward_count > inward_count
+        else "inward" if inward_count > outward_count
+        else "undetermined"
+    )
+    opposing = (
+        int(inward_count) if dominant == "outward"
+        else int(outward_count) if dominant == "inward"
+        else 0
+    )
+    return {
+        "outward_face_count": outward_count,
+        "inward_face_count": inward_count,
+        "near_zero_orientation_face_count": int(np.count_nonzero(near_zero)),
+        "dominant_orientation": dominant,
+        "globally_inward": bool(nonzero_count > 0 and inward_count == nonzero_count),
+        "globally_outward": bool(nonzero_count > 0 and outward_count == nonzero_count),
+        "opposing_dominant_orientation_count": opposing,
+        "orientation": (
+            "mixed" if outward_count and inward_count
+            else dominant if nonzero_count
+            else "undetermined"
+        ),
+    }
+
+
 def collapsed_face_geometry(
     sphere_vertices: np.ndarray,
     faces: np.ndarray,
@@ -129,24 +196,12 @@ def validate_sphere_parameterization(
             report["errors"].append("sphere has degenerate or near-collapsed triangles")
 
         signed_orientation = np.einsum("ij,ij->i", cross, triangles.mean(axis=1))
-        near_zero_orientation_count = int(
-            np.count_nonzero(np.abs(signed_orientation) <= SPHERE_ORIENTATION_TOLERANCE)
-        )
-        outward_count = int(np.count_nonzero(signed_orientation > SPHERE_ORIENTATION_TOLERANCE))
-        inward_count = int(np.count_nonzero(signed_orientation < -SPHERE_ORIENTATION_TOLERANCE))
-        report.update({
-            "outward_face_count": outward_count,
-            "inward_face_count": inward_count,
-            "near_zero_orientation_face_count": near_zero_orientation_count,
-            "orientation": (
-                "mixed" if outward_count and inward_count
-                else "outward" if outward_count
-                else "inward" if inward_count
-                else "undetermined"
-            ),
-        })
-        if near_zero_orientation_count or (outward_count and inward_count):
+        report.update(classify_sphere_orientation(signed_orientation))
+        report["edge_winding"] = edge_winding_diagnostics(sphere_faces)
+        if report["near_zero_orientation_face_count"] or report["opposing_dominant_orientation_count"]:
             report["errors"].append("sphere has folded or inconsistently oriented faces")
+        if not report["edge_winding"]["is_consistent"]:
+            report["errors"].append("sphere has inconsistent edge winding")
 
     report["is_valid"] = not report["errors"]
     return report

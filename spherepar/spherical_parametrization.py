@@ -25,6 +25,8 @@ from spherepar.parametrization_validation import (
     SPHERE_MIN_VERTEX_SEPARATION,
     SPHERE_ORIENTATION_TOLERANCE,
     SPHERE_UNIT_NORM_TOLERANCE,
+    classify_sphere_orientation,
+    edge_winding_diagnostics,
     validate_sphere_parameterization,
 )
 
@@ -65,8 +67,7 @@ def orient_sphere_faces_outward(
 
     By default, only an entirely inward winding is corrected by one global
     reversal. With ``force_all=True``, every inward face is reversed
-    individually; this is an intentional mesh-repair mode and hides local
-    fold diagnostics.
+    individually; this is an explicit repair mode that can hide local folds.
     """
     sphere_vertices = np.asarray(vertices, dtype=np.float64)
     sphere_faces = np.asarray(faces, dtype=np.int32)
@@ -101,6 +102,7 @@ def orient_sphere_faces_outward(
         "outward_face_count_before": outward,
         "near_zero_face_count": int(np.count_nonzero(~nondegenerate)),
         "flipped_face_count": int(np.count_nonzero(flip_mask)),
+        "local_repair": bool(force_all and applied and inward != int(np.count_nonzero(nondegenerate))),
     }
 
 
@@ -319,8 +321,10 @@ def compute_spherical_parametrization(
     mobius_center : bool
         If True, apply area-weighted Möbius centering after CEM or SphereMap.
     force_outward_winding : bool
-        For CEM output, reverse the complete face array only when every
+        For CEM output, request a global face-array reversal only when every
         non-degenerate sphere face is inward. Mixed/folded faces are retained.
+        The returned vertex array is unchanged; callers exporting faces should
+        apply the recorded ``winding_correction`` metadata.
     cem_input_diagnostics_callback : callable, optional
         Receives CEM input-quality diagnostics immediately before Algorithm 4.1.
     anchor_diagnostics : bool
@@ -502,6 +506,13 @@ def compute_spherical_parametrization(
 
     meta["mobius_center"] = bool(mobius_center)
     meta["force_outward_winding"] = bool(force_outward_winding)
+    if force_outward_winding and method == "cem":
+        _, winding_correction = orient_sphere_faces_outward(
+            sphere_vertices,
+            faces,
+            force_all=False,
+        )
+        meta["winding_correction"] = winding_correction
 
     norms = np.linalg.norm(sphere_vertices, axis=1)
     meta.update(

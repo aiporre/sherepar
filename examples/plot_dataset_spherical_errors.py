@@ -26,7 +26,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from spherepar.parametrization_validation import collapsed_face_geometry
+from spherepar.parametrization_validation import (
+    classify_sphere_orientation,
+    collapsed_face_geometry,
+    edge_winding_diagnostics,
+)
 
 
 MESH_EXTENSIONS = {".obj", ".ply", ".off", ".stl"}
@@ -112,7 +116,15 @@ def measure_sample(
         signed, outward_count, inward_count, orientation_zero_count = _orientation(
             unit_vertices, sphere_faces
         )
-        folded = signed < -1e-12
+        orientation = classify_sphere_orientation(signed)
+        folded = (
+            (signed < -1e-12)
+            if orientation["dominant_orientation"] == "outward"
+            else (signed > 1e-12)
+            if orientation["dominant_orientation"] == "inward"
+            else np.zeros(len(signed), dtype=bool)
+        )
+        edge_winding = edge_winding_diagnostics(sphere_faces)
         topology_ok = None
         topology_exact = None
         mesh_faces = None
@@ -144,7 +156,13 @@ def measure_sample(
                 "near_zero_fraction": float(np.mean(near_zero)),
                 "folded_face_count": int(np.count_nonzero(folded)),
                 "folded_fraction": float(np.mean(folded)),
-                "folded_count": int(inward_count),
+                "folded_count": int(np.count_nonzero(folded)),
+                "dominant_orientation": orientation["dominant_orientation"],
+                "globally_inward": orientation["globally_inward"],
+                "opposing_dominant_orientation_count": orientation[
+                    "opposing_dominant_orientation_count"
+                ],
+                "edge_winding": edge_winding,
                 "outward_count": outward_count,
                 "inward_count": inward_count,
                 "near_zero_orientation_count": orientation_zero_count,
@@ -275,8 +293,9 @@ def write_report(metrics: list[dict[str, Any]], backend: str, root: Path, output
         "Triangles are normalized to the unit sphere. Actual-zero triangles have "
         "exactly zero twice-area; near-zero triangles have positive twice-area "
         "at or below `max(1e-12, 1e-4 * median_twice_area)`; folded triangles "
-        "have negative radial orientation. Plot colors use actual-zero, near-zero, "
-        "folded, then normal precedence.",
+        "oppose the dominant radial orientation; a uniformly inward sphere is "
+        "reported as inward rather than folded. Plot colors use actual-zero, "
+        "near-zero, folded, then normal precedence.",
         "",
         "| Sample | Faces | Folded | Near-zero | Actual-zero | Threshold | Status |",
         "|---|---:|---:|---:|---:|---:|---|",

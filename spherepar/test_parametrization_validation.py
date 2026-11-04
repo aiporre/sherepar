@@ -9,6 +9,7 @@ from spherepar.spherical_parametrization import (
     _compute_face_normals,
     validate_sphere_parameterization,
 )
+from spherepar.parametrization_validation import edge_winding_diagnostics
 
 
 def test_global_inward_winding_is_reversed_without_per_face_fold_fix():
@@ -110,6 +111,41 @@ class TestSphereParameterizationValidation:
         assert report["degenerate_face_count"] > 0
         assert report["near_zero_orientation_face_count"] > 0
         assert len(report["errors"]) >= 3
+
+    def test_global_inward_is_not_reported_as_local_fold(self):
+        import trimesh
+
+        mesh = trimesh.creation.icosphere(subdivisions=1)
+        inward_faces = mesh.faces[:, [0, 2, 1]]
+        report = validate_sphere_parameterization(
+            mesh.vertices, inward_faces, mesh.vertices, inward_faces
+        )
+
+        assert report["orientation"] == "inward"
+        assert report["globally_inward"] is True
+        assert report["opposing_dominant_orientation_count"] == 0
+        assert "sphere has folded or inconsistently oriented faces" not in report["errors"]
+        assert report["edge_winding"]["is_consistent"] is True
+
+    def test_mixed_orientation_reports_only_opposing_faces(self):
+        import trimesh
+
+        mesh = trimesh.creation.icosphere(subdivisions=1)
+        mixed_faces = mesh.faces.copy()
+        mixed_faces[0] = mixed_faces[0][[0, 2, 1]]
+        report = validate_sphere_parameterization(
+            mesh.vertices, mixed_faces, mesh.vertices, mixed_faces
+        )
+
+        assert report["orientation"] == "mixed"
+        assert report["opposing_dominant_orientation_count"] == 1
+        assert "sphere has folded or inconsistently oriented faces" in report["errors"]
+
+    def test_edge_winding_diagnostics_detects_same_direction(self):
+        faces = np.array([[0, 1, 2], [0, 1, 3]], dtype=np.int32)
+        report = edge_winding_diagnostics(faces)
+        assert report["same_direction_edge_count"] == 1
+        assert report["is_consistent"] is False
 
 
 class TestVerifyTopologyPreserved:
