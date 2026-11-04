@@ -114,6 +114,7 @@ def measure_sample(
         )
         folded = signed < -1e-12
         topology_ok = None
+        topology_exact = None
         mesh_faces = None
         if mesh_path is not None:
             mesh = _load_triangle_mesh(mesh_path)
@@ -143,7 +144,7 @@ def measure_sample(
                 "near_zero_fraction": float(np.mean(near_zero)),
                 "folded_face_count": int(np.count_nonzero(folded)),
                 "folded_fraction": float(np.mean(folded)),
-                "folded_count": int(min(outward_count, inward_count)),
+                "folded_count": int(inward_count),
                 "outward_count": outward_count,
                 "inward_count": inward_count,
                 "near_zero_orientation_count": orientation_zero_count,
